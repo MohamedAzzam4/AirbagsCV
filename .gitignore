@@ -1,0 +1,42 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Datasets (too large for git)
+datasets/
+AITEX dataset/
+
+# Temporary files
+temp_predict.png
+*.tmp
+
+# Results - visualization images (too many/large)
+results/efficientad_aitex/EfficientAd/aitex/v1/
+results/efficientad_aitex/EfficientAd/aitex/v2/
+results/efficientad_aitex/EfficientAd/aitex/latest/images/
+results/patchcore_aitex/
+results/patchcore_carpet/
+results/EfficientAd/
+
+# Keep the model checkpoint (latest) and benchmark CSV
+!results/benchmark_results.csv
+!results/efficientad_aitex/EfficientAd/aitex/latest/weights/
+!results/efficientad_aitex/EfficientAd/aitex/latest/weights/lightning/
+!results/efficientad_aitex/EfficientAd/aitex/latest/weights/lightning/model.ckpt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

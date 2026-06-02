@@ -1,0 +1,10 @@
+anomalib[full]
+torch
+torchvision
+gradio
+matplotlib
+seaborn
+pandas
+opencv-python
+Pillow
+scikit-learn
