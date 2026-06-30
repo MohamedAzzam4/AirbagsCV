@@ -8,7 +8,10 @@ future work — do NOT pretend they are supported.
 
 Outputs
 -------
-* Lightning checkpoints under <output-dir>/<model>_<dataset>/.../lightning/model.ckpt
+* Lightning checkpoints under <output-dir>/<model>_<dataset>/.../lightning/
+    - last.ckpt              (overwritten each epoch)
+    - epoch=N-step=M.ckpt    (one per epoch, save_top_k=3 keeps best 3 by image_AUROC)
+    - model.ckpt             (best by validation image_AUROC, alias of the best epoch ckpt)
 * A metrics JSON at   <output-dir>/<model>_<dataset>/metrics.json
 * A CSV row appended to <output-dir>/benchmark_results.csv
 
@@ -21,7 +24,9 @@ dataloader overhead, metric computation, and batch dispatch. Use
 
 Resume
 ------
-Pass --resume-from-checkpoint to continue from an existing .ckpt.
+Pass --resume-from-checkpoint to continue from an existing .ckpt. Lightning
+restores optimizer state, LR scheduler, and epoch counter. The
+ModelCheckpoint callback's `last.ckpt` is the recommended resume target.
 """
 from __future__ import annotations
 
@@ -52,7 +57,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, required=True,
                     help="Where checkpoints and metrics are written.")
     p.add_argument("--epochs", type=int, default=70)
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=1,
+                    help="EfficientAD REQUIRES batch_size=1 (Anomalib 2.0.0 hard "
+                         "constraint, also matches the original paper). Any other "
+                         "value triggers a warning and is overridden to 1.")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--accelerator", default="auto",
                     choices=["auto", "gpu", "cpu", "cuda", "mps"])
@@ -68,9 +76,12 @@ def parse_args() -> argparse.Namespace:
                          "EfficientAD's penalty term. Download from "
                          "https://github.com/fastai/imagenette and pass --imagenet-dir.")
     p.add_argument("--resume-from-checkpoint", type=Path, default=None,
-                    help="Path to a Lightning .ckpt to resume from.")
+                    help="Path to a Lightning .ckpt to resume from. Recommended: "
+                         "the last.ckpt produced by a previous run.")
     p.add_argument("--limit-train-batches", type=float, default=1.0,
                     help="Lightning limit_train_batches (debug only).")
+    p.add_argument("--save-top-k", type=int, default=3,
+                    help="Number of best-by-val-image_AUROC checkpoints to keep.")
     p.add_argument("--log-level", default="INFO",
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p.parse_args()
@@ -99,11 +110,17 @@ def verify_data_dir(data_dir: Path) -> None:
 
 
 def build_model(args: argparse.Namespace):
-    """Instantiate the Anomalib model. Only EfficientAD is wired up."""
+    """Instantiate the Anomalib model. Only EfficientAD is wired up.
+
+    We attach a custom Evaluator with val_metrics so that image_AUROC is
+    logged during the validation loop. Without val_metrics, no metric is
+    logged during training, and ModelCheckpoint(monitor='image_AUROC')
+    cannot select a best checkpoint.
+    """
     from anomalib.models import EfficientAd
+    from anomalib.metrics import Evaluator, AUROC, F1Score
 
     # EfficientAD requires the imagenette dataset for its penalty term.
-    # Verify the path exists and looks like an ImageFolder layout.
     imagenet_dir = args.imagenet_dir
     if not imagenet_dir.exists():
         raise FileNotFoundError(
@@ -119,6 +136,14 @@ def build_model(args: argparse.Namespace):
             f"It must be an ImageFolder layout (e.g. imagenette2/train/<class>/*.JPEG)."
         )
 
+    # Validation metrics — needed so ModelCheckpoint can monitor image_AUROC.
+    image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
+    image_f1score = F1Score(fields=["pred_label", "gt_label"], prefix="image_")
+    pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
+    val_evaluator = Evaluator(
+        val_metrics=[image_auroc, image_f1score, pixel_auroc],
+    )
+
     return EfficientAd(
         model_size="small",
         teacher_out_channels=384,
@@ -127,6 +152,7 @@ def build_model(args: argparse.Namespace):
         padding=False,
         pad_maps=True,
         imagenet_dir=str(imagenet_dir),
+        evaluator=val_evaluator,
     )
 
 
@@ -153,20 +179,46 @@ def build_datamodule(args: argparse.Namespace):
         normal_test_dir="test/good",
         mask_dir="ground_truth/anomaly",
         train_batch_size=train_bs,
-        eval_batch_size=args.batch_size * 2 if args.batch_size > 1 else 8,
+        eval_batch_size=8,
         num_workers=args.num_workers,
         seed=args.seed,
     )
 
 
 def find_latest_checkpoint(run_dir: Path) -> Path | None:
-    """Deterministically find the newest checkpoint under run_dir."""
-    ckpts = sorted(run_dir.rglob("*.ckpt"))
-    # Sort by mtime to be filesystem-independent (NOT glob order).
+    """Deterministically find the newest checkpoint under run_dir.
+
+    Prefers last.ckpt if it exists (Lightning's canonical resume target);
+    otherwise falls back to the most recently modified .ckpt.
+    """
+    # Walk run_dir for *.ckpt. Look for last.ckpt first.
+    last_ckpts = list(run_dir.rglob("last.ckpt"))
+    if last_ckpts:
+        # If multiple, pick the most recently modified.
+        last_ckpts.sort(key=lambda p: p.stat().st_mtime)
+        return last_ckpts[-1]
+
+    ckpts = list(run_dir.rglob("*.ckpt"))
     if not ckpts:
         return None
     ckpts.sort(key=lambda p: p.stat().st_mtime)
     return ckpts[-1]
+
+
+def find_best_checkpoint(run_dir: Path) -> Path | None:
+    """Find the best checkpoint (monitored by val/image_AUROC).
+
+    Lightning names best checkpoints as 'model.ckpt' (when filename='model'
+    and monitor is set) OR 'epoch=N-step=M.ckpt'. We look for 'model.ckpt'
+    first, then any non-last.ckpt checkpoint.
+    """
+    # The ModelCheckpoint with filename='model' produces model.ckpt as the
+    # best checkpoint (and model-vN.ckpt for subsequent top-k).
+    model_ckpts = list(run_dir.rglob("model.ckpt")) + list(run_dir.rglob("model-v*.ckpt"))
+    if model_ckpts:
+        model_ckpts.sort(key=lambda p: p.stat().st_mtime)
+        return model_ckpts[-1]
+    return None
 
 
 def extract_metric(test_results: dict, key: str) -> float | None:
@@ -179,6 +231,39 @@ def extract_metric(test_results: dict, key: str) -> float | None:
             except (TypeError, ValueError):
                 return None
     return None
+
+
+def build_checkpoint_callback(run_dir: Path, save_top_k: int):
+    """Build a Lightning ModelCheckpoint callback.
+
+    Config:
+      - save_last=True           -> always have last.ckpt for resume
+      - every_n_epochs=1         -> one checkpoint per epoch
+      - monitor='image_AUROC'    -> best by validation image AUROC
+      - mode='max'               -> higher AUROC is better
+      - save_top_k=save_top_k    -> keep best N
+      - filename='model'         -> best ckpt is model.ckpt
+      - save_weights_only=False  -> full state (optimizer, scheduler) for resume
+
+    Anomalib's Engine will NOT add its own ModelCheckpoint if one is passed
+    via callbacks (see Engine._setup_anomalib_callbacks). So this is safe
+    and non-conflicting.
+    """
+    from lightning.pytorch.callbacks import ModelCheckpoint
+
+    ckpt_dir = run_dir / "weights" / "lightning"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    return ModelCheckpoint(
+        dirpath=str(ckpt_dir),
+        filename="model",
+        monitor="image_AUROC",
+        mode="max",
+        save_last=True,
+        save_top_k=save_top_k,
+        every_n_epochs=1,
+        save_weights_only=False,
+        auto_insert_metric_name=False,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -212,6 +297,9 @@ def main() -> int:
     model = build_model(args)
     datamodule = build_datamodule(args)
 
+    # Build the explicit checkpoint callback.
+    ckpt_callback = build_checkpoint_callback(run_dir, args.save_top_k)
+
     resume_path = None
     if args.resume_from_checkpoint is not None:
         if not args.resume_from_checkpoint.exists():
@@ -234,6 +322,7 @@ def main() -> int:
         devices=args.devices,
         precision=args.precision,
         default_root_dir=str(run_dir),
+        callbacks=[ckpt_callback],
     )
 
     # --- Train -------------------------------------------------------------
@@ -260,7 +349,7 @@ def main() -> int:
         "model": args.model,
         "dataset": args.dataset,
         "epochs": args.epochs,
-        "batch_size": args.batch_size,
+        "batch_size": 1 if args.model == "efficientad" else args.batch_size,
         "image_size": args.image_size,
         "seed": args.seed,
         "train_seconds": round(train_seconds, 2),
@@ -278,7 +367,6 @@ def main() -> int:
     metrics_path = run_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))
     logger.info("Metrics written to: %s", metrics_path)
-    logger.info("Metrics: %s", json.dumps(metrics, indent=2))
 
     # Append a row to the benchmark CSV (create header if missing).
     csv_path = args.output_dir / "benchmark_results.csv"
@@ -291,16 +379,26 @@ def main() -> int:
     out.to_csv(csv_path, index=False)
     logger.info("Benchmark CSV updated: %s", csv_path)
 
-    # Print the checkpoint path prominently (helps Colab resume).
-    latest_ckpt = find_latest_checkpoint(run_dir)
-    if latest_ckpt is not None:
-        logger.info("=" * 60)
-        logger.info("LATEST CHECKPOINT:")
-        logger.info("  %s", latest_ckpt)
-        logger.info("=" * 60)
-        print(f"\nCHECKPOINT_PATH={latest_ckpt}\n")
+    # --- Print all paths prominently --------------------------------------
+    last_ckpt = find_latest_checkpoint(run_dir)
+    best_ckpt = find_best_checkpoint(run_dir)
+    ckpt_dir = run_dir / "weights" / "lightning"
+
+    print("\n" + "=" * 70)
+    print("TRAINING COMPLETE — KEY PATHS")
+    print("=" * 70)
+    print(f"RUN_DIR={run_dir}")
+    print(f"LAST_CHECKPOINT_PATH={last_ckpt if last_ckpt else 'Not available'}")
+    if best_ckpt is not None:
+        print(f"BEST_CHECKPOINT_PATH={best_ckpt}")
     else:
-        logger.warning("No checkpoint found after training.")
+        print("BEST_CHECKPOINT_PATH=Not available: no monitored validation metric "
+              "produced a checkpoint (check that validation ran and image_AUROC "
+              "was logged during training)")
+    print(f"EPOCH_CHECKPOINT_DIR={ckpt_dir}")
+    print(f"METRICS_JSON_PATH={metrics_path}")
+    print(f"METRICS_CSV_PATH={csv_path}")
+    print("=" * 70 + "\n")
     return 0
 
 
