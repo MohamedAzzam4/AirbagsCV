@@ -1,4 +1,25 @@
-# 🔍 Honest Audit Report — AirBags-CV Project
+# Honest Audit Report — AirBags-CV Project
+
+> **Note (revision):** This audit was written against an earlier state of the
+> repo. Most of the issues it identified have now been fixed:
+> - The `app.py` size-mismatch crash is fixed (heatmap is resized to input).
+> - The `temp_predict.png` race condition is replaced with a tempfile.
+> - The blank-patch bug in `prepare_aitex.py` is fixed (configurable filter).
+> - The 41 ms "latency" measurement is removed from `train_models.py`;
+>   `scripts/benchmark_inference.py` now provides an honest measurement.
+> - The `>95% easily` and `75% accuracy` claims are removed from `walkthrough.md`.
+> - The smoke test (`scripts/smoke_test.py`) verifies the install end-to-end.
+>
+> What this audit still correctly identifies as outstanding:
+> - The existing checkpoint was produced by the OLD pipeline (10 epochs, blank
+>   patches included). It is committed only for reproducibility / demo
+>   bootstrapping. Retraining with the fixed pipeline is the first priority.
+> - MVTec Carpet / Grid baselines were never trained.
+> - PatchCore was abandoned and is not implemented.
+> - ONNX/OpenVINO export was never run.
+>
+> For current status, see the [Honest Status Table](../../README.md#honest-status-table)
+> in the root README.
 
 Everything below is my critical, unvarnished assessment of what the previous agents built. I'm being deliberately blunt so you can make informed decisions before presenting anything to stakeholders.
 

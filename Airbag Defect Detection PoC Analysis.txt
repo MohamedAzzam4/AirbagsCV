@@ -1,3 +1,16 @@
+================================================================================
+HISTORICAL RESEARCH NOTE -- read with caution.
+
+This file is a literature survey written BEFORE any code was implemented.
+It proposes many techniques (PatchCore, PaDiM, SimpleNet, Mahalanobis
+PatchCore, Incremental Coreset, HITL pipeline, CutPaste+Perlin, InCTRLv2,
+DINOSaur, cross-polarization optics, line-scan hardware BoM, etc.). As of the
+latest repo revision, ONLY EfficientAD on AITEX has actually been implemented.
+Do NOT treat the proposals in this file as "implemented" or "supported."
+
+For current status, see the Honest Status Table in README.md at the repo root.
+================================================================================
+
 ﻿Automated Defect Detection for Safety-Critical Manufacturing: Architecting Zero-Data, Continual Learning Computer Vision Systems for Edge Deployment
 The implementation of automated defect detection in safety-critical manufacturing, such as the production of polyamide automotive airbags, presents a highly constrained computational, statistical, and operational challenge. Polyamide airbag fabrics must adhere to an absolute zero-defect tolerance policy, wherein false negatives (passing a defective unit) carry catastrophic, life-threatening safety implications. Simultaneously, industrial deployment environments rarely provide proprietary, annotated defect datasets prior to the proof-of-concept (PoC) phase, necessitating the deployment of Unsupervised Anomaly Detection (UAD) systems initialized under strict cold-start parameters. The analytical framework detailed in this exhaustive report investigates the architectural paradigms required to construct, deploy, and perpetually refine a state-of-the-art anomaly detection system operating exclusively on constrained edge hardware, strictly adhering to the 80/20 Pareto principle to focus on the core engineering vectors that guarantee successful deployment.
 Pillar 1: State-of-the-Art Unsupervised Anomaly Detection—Cold Start and Zero Defect Data (2024–2026)

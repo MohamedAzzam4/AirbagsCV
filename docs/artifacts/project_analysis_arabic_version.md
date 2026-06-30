@@ -1,3 +1,15 @@
+<!--
+HISTORICAL RESEARCH NOTE -- read with caution.
+
+This file is the Arabic version of project_analysis.md. It describes what
+each research file PROPOSES, not what is IMPLEMENTED. As of the latest repo
+revision, ONLY EfficientAD on AITEX has actually been implemented. The
+proposals discussed here (PatchCore, SimpleNet, CutPaste+Perlin, HITL
+pipeline, line-scan hardware BoM, etc.) are future work.
+
+For current status, see the Honest Status Table in README.md at the repo root.
+-->
+
 # مشروع الكشف عن عيوب الوسائد الهوائية (Airbags) — التحليل الكامل والرأي الاستراتيجي
 
 ---

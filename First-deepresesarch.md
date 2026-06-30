@@ -1,3 +1,15 @@
+<!--
+HISTORICAL RESEARCH NOTE — read with caution.
+
+This file is a literature survey written BEFORE any code was implemented.
+It proposes many techniques (PatchCore, PaDiM, SimpleNet, Mahalanobis
+PatchCore, Incremental Coreset, HITL pipeline, CutPaste+Perlin, InCTRLv2,
+DINOSaur, etc.). As of the latest repo revision, ONLY EfficientAD on AITEX
+has actually been implemented. Do NOT treat the proposals in this file as
+"implemented" or "supported." For current status, see the Honest Status
+Table in README.md at the repo root.
+-->
+
 # **Advanced Computer Vision Strategies for Airbag Manufacturing Defect Detection: Dataset Analysis and Modeling Paradigms**
 
 ## **Introduction to the Defect Detection Landscape in Automotive Safety**

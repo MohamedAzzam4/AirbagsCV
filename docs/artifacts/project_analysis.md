@@ -1,3 +1,15 @@
+<!--
+HISTORICAL RESEARCH NOTE -- read with caution.
+
+This file is a meta-analysis of the three research .txt/.md files in the repo
+root. It describes what each research file proposes, NOT what is implemented.
+As of the latest repo revision, ONLY EfficientAD on AITEX has actually been
+implemented. The proposals discussed in this file (PatchCore, SimpleNet,
+CutPaste+Perlin, HITL pipeline, line-scan hardware BoM, etc.) are future work.
+
+For current status, see the Honest Status Table in README.md at the repo root.
+-->
+
 # Airbag Defect Detection Project — Full Analysis & Strategic Opinion
 
 ---

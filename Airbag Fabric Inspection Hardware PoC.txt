@@ -1,3 +1,16 @@
+================================================================================
+HISTORICAL RESEARCH NOTE -- read with caution.
+
+This file is a literature survey written BEFORE any code was implemented.
+It proposes many techniques (PatchCore, PaDiM, SimpleNet, Mahalanobis
+PatchCore, Incremental Coreset, HITL pipeline, CutPaste+Perlin, InCTRLv2,
+DINOSaur, cross-polarization optics, line-scan hardware BoM, etc.). As of the
+latest repo revision, ONLY EfficientAD on AITEX has actually been implemented.
+Do NOT treat the proposals in this file as "implemented" or "supported."
+
+For current status, see the Honest Status Table in README.md at the repo root.
+================================================================================
+
 ﻿Hardware Architecture for High-Speed Airbag Fabric Inspection: Optics, Cameras, and Illumination
 The engineering of an automated defect detection system for safety-critical airbag manufacturing represents one of the most unforgiving challenges within the industrial computer vision domain. Airbags are life-saving deployment devices that undergo explosive pneumatic inflation within milliseconds of a vehicular collision; consequently, the high-tenacity woven fabrics from which they are constructed are subjected to extreme tensile and thermal stresses. The manufacturing tolerance for structural flaws—such as broken yarns, mispicks, tears, holes, and inconsistent stitching—is absolute zero. The delivery of a Proof-of-Concept (PoC) for an airbag manufacturer under the constraint of possessing zero proprietary client data introduces a profound architectural bottleneck. Because all predictive model development must rely on synthetically generated defects and publicly available proxy datasets—specifically the AITEX Fabric Database, MVTec Anomaly Detection (AD) dataset, and the DAGM dataset—the physical hardware stack becomes the ultimate arbiter of success.
 If the model is trained entirely on the pristine, highly controlled optical environments of the AITEX or MVTec AD datasets, it will internalize the spatial frequencies, micro-shadows, and contrast ratios specific to those laboratory conditions. If the deployed PoC hardware fails to replicate this exact photometric distribution on the manufacturing floor, the deep neural network will suffer from immediate, catastrophic covariate shift. The live production data will appear mathematically alien to the model, rendering its feature extraction kernels useless. Furthermore, because this architecture must support continuous, online learning while deployed in production, the hardware must act as a rigid regularization mechanism. Online learning models update their synaptic weights dynamically; if the optical hardware allows ambient light fluctuations, motion blur, or focal degradation to contaminate the image stream, the model will mistake environmental noise for novel defect morphologies, leading to catastrophic forgetting of its proxy-trained foundations. Therefore, the selection of cameras, optics, and illumination is not merely a matter of image acquisition; it is the fundamental physics layer that dictates whether domain adaptation from synthetic data to physical reality is mathematically possible.
