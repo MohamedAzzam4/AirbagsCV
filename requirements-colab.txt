@@ -1,0 +1,23 @@
+# Requirements for Google Colab (CUDA 12.x runtime).
+#
+# Colab already ships with torch + torchvision preinstalled. Do NOT pip install
+# torch from the default index -- you will get the CPU build and lose GPU.
+# Just run:
+#     !pip install -r requirements-colab.txt
+#
+# If for some reason torch is missing or broken, run BEFORE this file:
+#     !pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Anomalib [full] pulls in: kornia, scikit-image, timm, FrEIA, open_clip, etc.
+anomalib[full]==2.0.0
+openvino==2024.4.0
+
+gradio==4.44.1
+matplotlib==3.9.2
+seaborn==0.13.2
+pandas==2.2.3
+opencv-python==4.10.0.84
+Pillow==10.4.0
+scikit-learn==1.5.2
+numpy==1.26.4
+tqdm==4.66.5

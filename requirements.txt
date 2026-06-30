@@ -1,10 +1,30 @@
-anomalib[full]
-torch
-torchvision
-gradio
-matplotlib
-seaborn
-pandas
-opencv-python
-Pillow
-scikit-learn
+# AirbagsCV dependencies.
+#
+# IMPORTANT: PyTorch must be installed SEPARATELY and BEFORE this file is used,
+# because the correct wheel index depends on your CUDA version. See README.md
+# for the right install command for your platform.
+#
+# These versions were chosen to match what produced the existing checkpoint and
+# what the smoke test verified to load it. Anomalib's metric key names changed
+# between versions (image_AUROC vs test_image_AUROC), which is why
+# train_models.py tries both -- do NOT upgrade Anomalib without re-testing.
+
+# Anomalib [full] pulls in: kornia, scikit-image, timm, FrEIA, open_clip,
+# openvino, etc. If you want a leaner install, replace this with `anomalib`
+# (no extras) and install the missing pieces manually as the smoke test
+# reports them.
+anomalib[full]==2.0.0
+
+# Pin openvino to a version whose `openvino.runtime` submodule still exists
+# (newer 2025.x renamed the package layout and breaks Anomalib 2.0.0 imports).
+openvino==2024.4.0
+
+gradio==4.44.1
+matplotlib==3.9.2
+seaborn==0.13.2
+pandas==2.2.3
+opencv-python==4.10.0.84
+Pillow==10.4.0
+scikit-learn==1.5.2
+numpy==1.26.4
+tqdm==4.66.5

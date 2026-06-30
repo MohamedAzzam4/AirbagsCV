@@ -11,9 +11,16 @@ __pycache__/
 dist/
 build/
 
+# Test caches
+.pytest_cache/
+.coverage
+htmlcov/
+
 # Datasets (too large for git)
 datasets/
 AITEX dataset/
+imagenette/
+pre_trained/
 
 # Temporary files
 temp_predict.png
