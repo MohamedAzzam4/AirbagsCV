@@ -64,6 +64,9 @@ The correct first direction is unsupervised anomaly detection / anomaly segmenta
 | Google Colab training | Implemented | `notebooks/COLAB_GUIDE.md` | Calls repo scripts; does NOT reimplement training. |
 | Latency benchmark | Implemented | `scripts/benchmark_inference.py` | Patch/image-level only. **Not** line-scan production throughput. |
 | Reproducibility (pinned deps, seed, smoke test) | Implemented | `requirements*.txt`, `pyproject.toml`, `--seed` arg, `scripts/smoke_test.py` | Python 3.10–3.12 supported. Python 3.13+ may work but is not tested. |
+| Frequent checkpointing + resume | Implemented | `train_models.py` `build_checkpoint_callback()`: `save_last=True`, `every_n_epochs=1`, `save_top_k=3` monitored on `image_AUROC` | `last.ckpt` is the recommended resume target. Best ckpt is `model.ckpt`. |
+| Google Colab Mode A (Drive-persistent) | Implemented | `notebooks/COLAB_GUIDE.md` §"Mode A" | Trains directly from prepared data on Drive; safer after disconnect; slower. |
+| Google Colab Mode B (local-cache) | Implemented | `notebooks/COLAB_GUIDE.md` §"Mode B" | Copies prepared data from Drive to `/content` at runtime; faster; checkpoints still go to Drive. |
 
 ---
 
@@ -133,6 +136,10 @@ The `--source` directory must contain `NODefect_images/`, `Defect_images/`, and 
 
 ### 2. Train EfficientAD
 
+EfficientAD **requires `--batch-size 1`** (Anomalib 2.0.0 hard constraint; also matches the original paper). Any other value triggers a warning and is overridden to 1.
+
+EfficientAD **also requires `--imagenet-dir`** pointing at an ImageFolder-format imagenette dataset (used for its penalty term). Download `imagenette2-160.tgz` from https://github.com/fastai/imagenette and extract it.
+
 ```bash
 python scripts/train_models.py \
   --model efficientad \
@@ -140,21 +147,37 @@ python scripts/train_models.py \
   --data-dir ./datasets/aitex \
   --output-dir ./results \
   --epochs 70 \
-  --batch-size 8 \
+  --batch-size 1 \
   --num-workers 2 \
   --accelerator auto \
   --devices 1 \
   --precision 16-mixed \
-  --seed 42
+  --seed 42 \
+  --imagenet-dir /path/to/imagenette/train
 ```
 
-The script prints the final checkpoint path prominently, e.g.:
+At the end, the script prints all key paths:
 
 ```
-CHECKPOINT_PATH=results/efficientad_aitex/EfficientAd/aitex/latest/weights/lightning/model.ckpt
+======================================================================
+TRAINING COMPLETE — KEY PATHS
+======================================================================
+RUN_DIR=results/efficientad_aitex
+LAST_CHECKPOINT_PATH=results/efficientad_aitex/weights/lightning/last.ckpt
+BEST_CHECKPOINT_PATH=results/efficientad_aitex/weights/lightning/model.ckpt
+EPOCH_CHECKPOINT_DIR=results/efficientad_aitex/weights/lightning
+METRICS_JSON_PATH=results/efficientad_aitex/metrics.json
+METRICS_CSV_PATH=results/benchmark_results.csv
+======================================================================
 ```
 
-It also writes `metrics.json` and appends a row to `results/benchmark_results.csv`.
+Checkpoints saved per epoch (every_n_epochs=1, save_top_k=3 by val image_AUROC):
+- `last.ckpt` — always overwritten each epoch; the recommended resume target.
+- `model.ckpt` — best by validation `image_AUROC`.
+- `epoch=N-step=M.ckpt` — top-k best epoch checkpoints.
+
+If no monitored validation metric is available (e.g. custom evaluator without val_metrics), the script prints:
+`BEST_CHECKPOINT_PATH=Not available: no monitored validation metric produced a checkpoint`.
 
 ### 3. Resume training from a checkpoint
 
@@ -165,8 +188,17 @@ python scripts/train_models.py \
   --data-dir ./datasets/aitex \
   --output-dir ./results \
   --epochs 70 \
-  --resume-from-checkpoint ./results/efficientad_aitex/EfficientAd/aitex/latest/weights/lightning/model.ckpt
+  --batch-size 1 \
+  --num-workers 2 \
+  --accelerator auto \
+  --devices 1 \
+  --precision 16-mixed \
+  --seed 42 \
+  --imagenet-dir /path/to/imagenette/train \
+  --resume-from-checkpoint ./results/efficientad_aitex/weights/lightning/last.ckpt
 ```
+
+The recommended resume target is `last.ckpt` (it carries full optimizer + scheduler state).
 
 ### 4. Run honest inference benchmark
 
@@ -182,7 +214,7 @@ python scripts/benchmark_inference.py \
   --iterations 200
 ```
 
-Outputs `latency.csv` and `latency.json` with p50 / p95 / p99 / mean / throughput. **Patch-level only — not production line-scan throughput.**
+Outputs `latency.csv` and `latency.json` with p50 / p95 / p99 / mean / throughput. **Patch-level only — not production line-scan throughput.** `--batch-size` for the benchmark is currently fixed at 1 (per-image predict).
 
 ### 5. Run the Gradio demo
 
@@ -205,19 +237,25 @@ python scripts/smoke_test.py --checkpoint ./results/efficientad_aitex/EfficientA
 
 ## Google Colab workflow
 
-See [`notebooks/COLAB_GUIDE.md`](notebooks/COLAB_GUIDE.md) for a complete copy-paste Colab workflow. The notebook **does not reimplement training** — it clones the repo, installs deps, mounts Drive, and calls the repo scripts from the command line.
+See [`notebooks/COLAB_GUIDE.md`](notebooks/COLAB_GUIDE.md) for the complete copy-paste Colab workflow (or open [`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb) directly in Colab). The notebook **does not reimplement training** — it clones the repo, installs deps, mounts Drive, and calls the repo scripts from the command line.
 
-Quick summary:
+Default Drive paths (all under `/content/drive/MyDrive/AirbagsCV/`):
 
-1. `Runtime > Change runtime type > GPU`
-2. Mount Google Drive.
-3. `git clone https://github.com/MohamedAzzam4/AirbagsCV.git`
-4. `pip install -r requirements-colab.txt`
-5. Put raw AITEX at `/content/drive/MyDrive/datasets/AITEX`.
-6. `python scripts/prepare_aitex.py --source ... --output ...`
-7. `python scripts/train_models.py ...`
-8. `python scripts/benchmark_inference.py ...`
-9. All checkpoints / metrics / latency CSV land in `/content/driveMyDrive/AirbagsCV/`.
+| Variable | Default | Purpose |
+|---|---|---|
+| `RAW_AITEX_DIR` | `/content/drive/MyDrive/datasets/AITEX` | Raw AITEX (NODefect_images/, Defect_images/, Mask_images/) |
+| `IMAGENETTE_DIR` | `/content/drive/MyDrive/datasets/imagenette/train` | Imagenette train/ for EfficientAD penalty term |
+| `PREPARED_DATA_DIR` | `/content/drive/MyDrive/AirbagsCV/prepared/aitex_patches` | Anomalib Folder layout produced by `prepare_aitex.py` |
+| `RUNS_DIR` | `/content/drive/MyDrive/AirbagsCV/runs` | Checkpoints, metrics.json, benchmark CSV |
+| `RESULTS_DIR` | `/content/drive/MyDrive/AirbagsCV/results` | latency.csv / latency.json |
+| `CACHE_DIR` | `/content/drive/MyDrive/AirbagsCV/cache` | Optional zipped prepared dataset for Mode B |
+
+Two I/O modes are documented in the guide:
+
+- **Mode A (Drive-persistent):** train directly from `PREPARED_DATA_DIR` on Drive. Safer after disconnect; slower (Drive I/O per batch).
+- **Mode B (local-cache):** copy/unzip prepared data to `/content` at runtime, train from there, save checkpoints back to Drive. Faster; same Drive safety for checkpoints.
+
+Both modes save all checkpoints, metrics, and benchmark outputs to Drive. The guide includes a robust resume cell that remounts Drive, pulls latest repo, reinstalls deps, redefines env vars, finds the latest `last.ckpt`, and resumes training.
 
 ---
 

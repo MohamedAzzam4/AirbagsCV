@@ -14,17 +14,16 @@ Drive, and calls `scripts/prepare_aitex.py`, `scripts/train_models.py`, and
 
 ## 0. Before you start
 
-- A Google account with Google Drive.
-- The raw AITEX dataset, obtained from
+You need on Google Drive:
+
+- **Raw AITEX** at `/content/drive/MyDrive/datasets/AITEX/` containing
+  `NODefect_images/`, `Defect_images/`, `Mask_images/`. Obtain AITEX from
   [AITEX AFID](https://www.aitex.es/afid/) (registration required) or the
   [Kaggle mirror](https://www.kaggle.com/datasets/rmshashi/fabric-defect-dataset).
-  Upload it to your Google Drive at `/MyDrive/datasets/AITEX/`. The folder
-  must contain `NODefect_images/`, `Defect_images/`, and `Mask_images/`.
-- The Imagenette dataset (EfficientAD requires it for its penalty term).
-  Download `imagenette2-160.tgz` from
-  https://github.com/fastai/imagenette (~1.5 GB) and extract it to
-  `/MyDrive/datasets/imagenette/`. The folder must contain
-  `train/<class>/*.JPEG` and `val/<class>/*.JPEG`.
+- **Imagenette** at `/content/drive/MyDrive/datasets/imagenette/train/`
+  containing class subdirectories with `.JPEG` files. EfficientAD requires
+  this for its penalty term. Download `imagenette2-160.tgz` from
+  https://github.com/fastai/imagenette (~1.5 GB) and extract it.
 
 ---
 
@@ -59,11 +58,17 @@ drive.mount('/content/drive')
 
 # Quick sanity check — should print your AITEX folder.
 import os
-print(os.listdir('/content/drive/MyDrive/datasets/AITEX'))
+aitex_path = '/content/drive/MyDrive/datasets/AITEX'
+if os.path.isdir(aitex_path):
+    print('AITEX contents:', os.listdir(aitex_path))
+else:
+    raise FileNotFoundError(
+        f'{aitex_path} does not exist. Upload AITEX first (see section 0).'
+    )
 ```
 
-If the `ls` fails, you have not uploaded AITEX to the path in section 0.
-Either upload it or change the paths below.
+If the `raise` fires, you have not uploaded AITEX to the path in section 0.
+Either upload it or change `RAW_AITEX_DIR` below.
 
 ---
 
@@ -95,7 +100,7 @@ the GPU.
 ```bash
 %%bash
 cd /content/AirbagsCV
-pip install -r requirements-colab.txt
+pip install -r requirements-colab.txt 2>&1 | tail -10
 ```
 
 If for some reason torch is missing or broken, run this **before** the
@@ -118,40 +123,61 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
 ## 5. Define paths
 
+These are the **default Drive-persistent paths**. All outputs land on Drive
+so they survive Colab disconnects.
+
 ```python
 import os
-os.environ['REPO_DIR']        = '/content/AirbagsCV'
-os.environ['RAW_AITEX_DIR']   = '/content/drive/MyDrive/datasets/AITEX'
-os.environ['IMAGENETTE_DIR']  = '/content/drive/MyDrive/datasets/imagenette/train'
-os.environ['PREPARED_DATA_DIR'] = '/content/airbagcv_data/aitex_patches'
-os.environ['RUNS_DIR']        = '/content/drive/MyDrive/AirbagsCV/runs'
-os.environ['RESULTS_DIR']     = '/content/drive/MyDrive/AirbagsCV/results'
+os.environ['REPO_DIR']          = '/content/AirbagsCV'
+os.environ['RAW_AITEX_DIR']     = '/content/drive/MyDrive/datasets/AITEX'
+os.environ['IMAGENETTE_DIR']    = '/content/drive/MyDrive/datasets/imagenette/train'
+os.environ['PREPARED_DATA_DIR'] = '/content/drive/MyDrive/AirbagsCV/prepared/aitex_patches'
+os.environ['RUNS_DIR']          = '/content/drive/MyDrive/AirbagsCV/runs'
+os.environ['RESULTS_DIR']       = '/content/drive/MyDrive/AirbagsCV/results'
+os.environ['CACHE_DIR']         = '/content/drive/MyDrive/AirbagsCV/cache'
 
-# Create local + Drive dirs
-for d in ['PREPARED_DATA_DIR', 'RUNS_DIR', 'RESULTS_DIR']:
+# Create all Drive dirs
+for d in ['PREPARED_DATA_DIR', 'RUNS_DIR', 'RESULTS_DIR', 'CACHE_DIR']:
     os.makedirs(os.environ[d], exist_ok=True)
 
 # Show
 for k, v in os.environ.items():
-    if k in ['REPO_DIR','RAW_AITEX_DIR','IMAGENETTE_DIR','PREPARED_DATA_DIR','RUNS_DIR','RESULTS_DIR']:
+    if k in ['REPO_DIR','RAW_AITEX_DIR','IMAGENETTE_DIR','PREPARED_DATA_DIR',
+             'RUNS_DIR','RESULTS_DIR','CACHE_DIR']:
         print(f"{k:25s} {v}")
 ```
 
-**Verify dataset is reachable:**
+**Verify datasets are reachable:**
 
 ```python
 import os
+# AITEX
 required = ['NODefect_images', 'Defect_images', 'Mask_images']
 for r in required:
     p = os.path.join(os.environ['RAW_AITEX_DIR'], r)
-    ok = os.path.isdir(p)
-    print(f"  {'OK ' if ok else 'MISSING'}  {p}")
-    if not ok:
-        raise FileNotFoundError(f"Missing {r}. Check your Drive path.")
-```
+    if not os.path.isdir(p):
+        raise FileNotFoundError(
+            f"Missing {p}. Check RAW_AITEX_DIR or upload AITEX to Drive."
+        )
+print('AITEX OK')
 
-If this errors, you have the wrong path. Either fix `RAW_AITEX_DIR` or upload
-AITEX to that location.
+# Imagenette
+if not os.path.isdir(os.environ['IMAGENETTE_DIR']):
+    raise FileNotFoundError(
+        f"Missing imagenette at {os.environ['IMAGENETTE_DIR']}. "
+        f"Download imagenette2-160.tgz from https://github.com/fastai/imagenette "
+        f"and extract to /content/drive/MyDrive/datasets/imagenette/."
+    )
+# Sanity: must have class subdirs
+subdirs = [d for d in os.listdir(os.environ['IMAGENETTE_DIR'])
+           if os.path.isdir(os.path.join(os.environ['IMAGENETTE_DIR'], d))]
+if not subdirs:
+    raise FileNotFoundError(
+        f"{os.environ['IMAGENETTE_DIR']} exists but has no class subdirs. "
+        f"It must be ImageFolder layout: imagenette/train/<class>/*.JPEG"
+    )
+print(f'Imagenette OK ({len(subdirs)} classes)')
+```
 
 ---
 
@@ -170,6 +196,9 @@ install work.
 ---
 
 ## 7. Prepare AITEX data
+
+This writes the Anomalib `Folder` layout to `PREPARED_DATA_DIR` (on Drive by
+default — see Mode A/B below for alternatives).
 
 ```bash
 %%bash
@@ -196,7 +225,75 @@ black border columns that would otherwise poison the training distribution.
 
 ---
 
-## 8. Train EfficientAD
+## 8. Choose Mode A or Mode B (Drive I/O strategy)
+
+Google Drive can be slow for many small files (the prepared AITEX set has
+~2,000 patches). Two modes are supported.
+
+### Mode A — Persistent (default, safer)
+
+Train directly from `PREPARED_DATA_DIR` on Drive. **Safer after disconnect**
+(you can resume from any checkpoint). **Slower training** (Drive I/O per
+batch). Use this for short runs or first-time setup.
+
+To use Mode A, do nothing extra — proceed to step 9.
+
+### Mode B — Faster local-cache
+
+Copy the prepared dataset from Drive to `/content` at the start of the
+runtime, train from there, and save checkpoints/results **back to Drive**.
+**Faster training** (local SSD I/O). Same Drive safety for checkpoints. Use
+this for full 70-epoch runs.
+
+```python
+# === Mode B only: copy prepared data from Drive to /content ===
+import os, shutil
+LOCAL_DATA_DIR = '/content/aitex_patches_local'
+if os.path.exists(LOCAL_DATA_DIR):
+    print(f'{LOCAL_DATA_DIR} already exists; reusing.')
+else:
+    print(f'Copying {os.environ["PREPARED_DATA_DIR"]} -> {LOCAL_DATA_DIR} ...')
+    shutil.copytree(os.environ['PREPARED_DATA_DIR'], LOCAL_DATA_DIR)
+    print('Done.')
+
+# Override PREPARED_DATA_DIR for the rest of the runtime
+os.environ['PREPARED_DATA_DIR_DRIVE'] = os.environ['PREPARED_DATA_DIR']  # keep Drive copy for reference
+os.environ['PREPARED_DATA_DIR'] = LOCAL_DATA_DIR
+print('PREPARED_DATA_DIR is now:', os.environ['PREPARED_DATA_DIR'])
+print('  (checkpoints/results still go to RUNS_DIR/RESULTS_DIR on Drive)')
+```
+
+**Optional: also zip the prepared dataset to Drive for fast Mode B restore
+in future runtimes.** This is a one-time setup; subsequent runtimes unzip
+instead of re-running `prepare_aitex.py`:
+
+```python
+# === Optional: create a zip of the prepared dataset on Drive ===
+import os, subprocess
+zip_path = os.path.join(os.environ['CACHE_DIR'], 'aitex_patches.zip')
+if not os.path.exists(zip_path):
+    print(f'Creating {zip_path} (this takes a few minutes) ...')
+    subprocess.run(
+        ['zip', '-r', '-q', zip_path, '.'],
+        cwd=os.environ['PREPARED_DATA_DIR_DRIVE'],  # the Drive copy
+        check=True,
+    )
+    print('Done.')
+else:
+    print(f'{zip_path} already exists; reusing.')
+
+# To restore in a future runtime:
+#   os.makedirs(LOCAL_DATA_DIR, exist_ok=True)
+#   subprocess.run(['unzip', '-q', zip_path, '-d', LOCAL_DATA_DIR], check=True)
+```
+
+---
+
+## 9. Train EfficientAD (from scratch)
+
+EfficientAD **requires `--batch-size 1`** (Anomalib 2.0.0 hard constraint;
+the script warns and overrides any other value). EfficientAD **also requires
+`--imagenet-dir`** pointing at imagenette.
 
 ```bash
 %%bash
@@ -216,44 +313,96 @@ python scripts/train_models.py \
   --imagenet-dir "$IMAGENETTE_DIR"
 ```
 
-Notes:
-- `--batch-size 1` is REQUIRED by Anomalib 2.0.0's EfficientAd. The script
-  will warn and override if you pass anything else.
-- `--precision 16-mixed` gives ~2× speedup on T4 with no accuracy loss.
-- `--epochs 70` is the paper's recipe. Budget ~30–60 min on T4.
-- `--imagenet-dir` is REQUIRED by EfficientAD's penalty term.
-
-The script prints the checkpoint path prominently at the end:
+At the end, the script prints all key paths:
 
 ```
-CHECKPOINT_PATH=/content/drive/MyDrive/AirbagsCV/runs/efficientad_aitex/.../model.ckpt
+======================================================================
+TRAINING COMPLETE — KEY PATHS
+======================================================================
+RUN_DIR=/content/drive/MyDrive/AirbagsCV/runs/efficientad_aitex
+LAST_CHECKPOINT_PATH=/content/drive/MyDrive/AirbagsCV/runs/efficientad_aitex/weights/lightning/last.ckpt
+BEST_CHECKPOINT_PATH=/content/drive/MyDrive/AirbagsCV/runs/efficientad_aitex/weights/lightning/model.ckpt
+EPOCH_CHECKPOINT_DIR=/content/drive/MyDrive/AirbagsCV/runs/efficientad_aitex/weights/lightning
+METRICS_JSON_PATH=/content/drive/MyDrive/AirbagsCV/runs/efficientad_aitex/metrics.json
+METRICS_CSV_PATH=/content/drive/MyDrive/AirbagsCV/runs/benchmark_results.csv
+======================================================================
 ```
 
-It also writes:
-- `metrics.json` next to the checkpoint (image_AUROC, pixel_AUROC, etc.)
-- a row appended to `$RUNS_DIR/benchmark_results.csv`
+Checkpoints saved per epoch:
+- `last.ckpt` — always overwritten each epoch; the **recommended resume target**.
+- `model.ckpt` — best by validation `image_AUROC`.
+- `epoch=N-step=M.ckpt` — top-3 best epoch checkpoints.
 
-If the cell disconnects before training finishes (Colab free tier
-disconnects after ~12 h idle, but a single training run of 70 epochs is
-typically well within limits), the checkpoint is on Drive — use step 9 to
-resume.
+If Colab disconnects before training finishes, the latest `last.ckpt` is on
+Drive — use step 10 to resume.
 
 ---
 
-## 9. Resume training from a checkpoint
+## 10. Resume training from a checkpoint (after disconnect)
 
-If Colab disconnected mid-training, find your latest checkpoint on Drive and
-resume:
+This is a **robust resume cell**: it remounts Drive, pulls latest repo,
+reinstalls deps if needed, redefines env vars, finds the latest `last.ckpt`,
+and resumes training. If no checkpoint exists, it tells you to start from
+scratch (step 9).
 
 ```python
-import glob, os
+# === ROBUST RESUME CELL ===
+# 1. Remount Drive (in case this is a fresh runtime after disconnect)
+from google.colab import drive
+drive.mount('/content/drive', force_remount=True)
+
+# 2. Pull latest repo
+import subprocess
+repo_dir = '/content/AirbagsCV'
+if not __import__('os').path.isdir(repo_dir):
+    subprocess.run(['git', 'clone', 'https://github.com/MohamedAzzam4/AirbagsCV.git', repo_dir], check=True)
+else:
+    subprocess.run(['git', '-C', repo_dir, 'pull'], check=True)
+
+# 3. Check if dependencies are installed; reinstall if not
+try:
+    import anomalib  # noqa: F401
+    print('Dependencies OK.')
+except ImportError:
+    print('anomalib missing; reinstalling dependencies...')
+    subprocess.run(['pip', 'install', '-r', f'{repo_dir}/requirements-colab.txt'], check=True)
+
+# 4. Redefine env vars (must match step 5)
+import os
+os.environ['REPO_DIR']          = '/content/AirbagsCV'
+os.environ['RAW_AITEX_DIR']     = '/content/drive/MyDrive/datasets/AITEX'
+os.environ['IMAGENETTE_DIR']    = '/content/drive/MyDrive/datasets/imagenette/train'
+os.environ['PREPARED_DATA_DIR'] = '/content/drive/MyDrive/AirbagsCV/prepared/aitex_patches'
+os.environ['RUNS_DIR']          = '/content/drive/MyDrive/AirbagsCV/runs'
+os.environ['RESULTS_DIR']       = '/content/drive/MyDrive/AirbagsCV/results'
+os.environ['CACHE_DIR']         = '/content/drive/MyDrive/AirbagsCV/cache'
+for d in ['PREPARED_DATA_DIR', 'RUNS_DIR', 'RESULTS_DIR', 'CACHE_DIR']:
+    os.makedirs(os.environ[d], exist_ok=True)
+
+# 5. Find latest checkpoint under RUNS_DIR (prefers last.ckpt)
+import glob
 run_dir = os.path.join(os.environ['RUNS_DIR'], 'efficientad_aitex')
-ckpts = sorted(glob.glob(f'{run_dir}/**/*.ckpt', recursive=True),
-               key=lambda p: os.path.getmtime(p))
-assert ckpts, f"No checkpoint found under {run_dir}"
-CKPT = ckpts[-1]
-print("Latest checkpoint:", CKPT)
+last_ckpts = sorted(
+    glob.glob(f'{run_dir}/**/last.ckpt', recursive=True),
+    key=lambda p: os.path.getmtime(p),
+)
+all_ckpts = sorted(
+    glob.glob(f'{run_dir}/**/*.ckpt', recursive=True),
+    key=lambda p: os.path.getmtime(p),
+)
+if last_ckpts:
+    CKPT = last_ckpts[-1]
+    print(f'Resuming from last.ckpt: {CKPT}')
+elif all_ckpts:
+    CKPT = all_ckpts[-1]
+    print(f'WARNING: no last.ckpt found; resuming from newest checkpoint: {CKPT}')
+else:
+    CKPT = None
+    print(f'NO CHECKPOINT FOUND under {run_dir}.')
+    print('Training must start from zero — run step 9 (Train EfficientAD from scratch).')
 ```
+
+If `CKPT` is set, run the resume command:
 
 ```bash
 %%bash -s "$CKPT"
@@ -280,10 +429,29 @@ scheduler, and the epoch counter.
 
 ---
 
-## 10. Run honest inference benchmark
+## 11. Run honest inference benchmark
 
 After training (or using the committed checkpoint), measure real per-image
 latency:
+
+```python
+# Set CHECKPOINT_PATH — prefer last.ckpt, fall back to model.ckpt, fall back to repo's committed ckpt
+import glob, os
+run_dir = os.path.join(os.environ['RUNS_DIR'], 'efficientad_aitex')
+candidates = []
+for pattern in ['last.ckpt', 'model.ckpt']:
+    found = sorted(glob.glob(f'{run_dir}/**/{pattern}', recursive=True),
+                   key=lambda p: os.path.getmtime(p))
+    candidates.extend(found)
+# Fall back to any checkpoint
+candidates.extend(sorted(glob.glob(f'{run_dir}/**/*.ckpt', recursive=True),
+                         key=lambda p: os.path.getmtime(p)))
+# Fall back to repo's committed checkpoint (for first run before any training)
+if not candidates:
+    candidates = ['results/efficientad_aitex/EfficientAd/aitex/latest/weights/lightning/model.ckpt']
+os.environ['CHECKPOINT_PATH'] = candidates[0]
+print('CHECKPOINT_PATH =', os.environ['CHECKPOINT_PATH'])
+```
 
 ```bash
 %%bash
@@ -294,20 +462,9 @@ python scripts/benchmark_inference.py \
   --data-dir "$PREPARED_DATA_DIR" \
   --output-csv "$RESULTS_DIR/latency.csv" \
   --device cuda \
+  --batch-size 1 \
   --warmup 20 \
   --iterations 200
-```
-
-To set `$CHECKPOINT_PATH` from Python:
-
-```python
-import glob, os
-run_dir = os.path.join(os.environ['RUNS_DIR'], 'efficientad_aitex')
-ckpts = sorted(glob.glob(f'{run_dir}/**/*.ckpt', recursive=True),
-               key=lambda p: os.path.getmtime(p))
-os.environ['CHECKPOINT_PATH'] = ckpts[-1] if ckpts else \
-    'results/efficientad_aitex/EfficientAd/aitex/latest/weights/lightning/model.ckpt'
-print("CHECKPOINT_PATH =", os.environ['CHECKPOINT_PATH'])
 ```
 
 Expected output:
@@ -329,7 +486,7 @@ this is industrial line-scan throughput.
 
 ---
 
-## 11. Verify all outputs are on Drive
+## 12. Verify all outputs are on Drive
 
 ```python
 import os
@@ -351,7 +508,9 @@ for label, path in [
 ```
 
 You should see:
-- `efficientad_aitex/.../model.ckpt`
+- `efficientad_aitex/weights/lightning/last.ckpt`
+- `efficientad_aitex/weights/lightning/model.ckpt` (best)
+- `efficientad_aitex/weights/lightning/epoch=N-step=M.ckpt` (top-3)
 - `efficientad_aitex/metrics.json`
 - `benchmark_results.csv`
 - `latency.csv` + `latency.json`
@@ -360,7 +519,7 @@ All of these persist on Drive and survive Colab disconnects.
 
 ---
 
-## 12. Zip final outputs (optional)
+## 13. Zip final outputs (optional)
 
 ```bash
 %%bash
@@ -372,28 +531,31 @@ zip -r /content/drive/MyDrive/AirbagsCV/airbagcv_run_outputs.zip \
 
 ---
 
-## 13. Common failure modes — clear messages and fixes
+## 14. Common failure modes — clear messages and fixes
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `CUDA available: False` | GPU runtime not selected | Runtime > Change runtime type > GPU |
 | `FileNotFoundError: No NODefect_images` | Wrong `RAW_AITEX_DIR` | Check Drive path; fix env var in step 5 |
-| `FileNotFoundError: Couldn't find any class folder in datasets/imagenette` | Missing or wrong-format imagenette | Download `imagenette2-160.tgz`, extract, point `--imagenet-dir` at the `train/` subdir |
+| `FileNotFoundError: Couldn't find any class folder in datasets/imagenette` | Missing or wrong-format imagenette | Download `imagenette2-160.tgz`, extract, point `IMAGENETTE_DIR` at the `train/` subdir |
+| `FileNotFoundError: EfficientAD requires the 'imagenette' dataset at ...` | Missing `--imagenet-dir` | Add `--imagenet-dir "$IMAGENETTE_DIR"` to every train/resume command |
 | `TypeError: Folder.__init__() got an unexpected keyword argument 'image_size'` | Anomalib version mismatch | Ensure `anomalib==2.0.0` is installed (the requirements file pins it) |
 | `ValueError: train_batch_size for EfficientAd should be 1` | Wrong `--batch-size` | Use `--batch-size 1`. The script will warn and override anyway. |
-| Colab disconnects mid-training | Idle timeout (free tier) | Reconnect, find latest checkpoint on Drive, run step 9 (resume) |
+| Colab disconnects mid-training | Idle timeout (free tier) | Reconnect, run step 10 (robust resume cell) |
 | `RuntimeError: CUDA out of memory` | Batch too large or other process using GPU | Use `--batch-size 1` (required anyway). Restart runtime if memory is fragmented. |
 | `ModuleNotFoundError: No module named 'anomalib'` | Step 4 skipped or failed | Re-run `pip install -r requirements-colab.txt` |
 | Demo `cv2.addWeighted` size mismatch | You're running the OLD version of the repo | `git pull` to get the fix |
+| `FileNotFoundError: No checkpoint found under ...` (resume) | No checkpoint exists yet | Run step 9 (train from scratch) first |
+| Drive mount fails / hangs | Colab browser permission issue | Runtime > Restart session, then re-run step 2 |
 
 ---
 
-## 14. Run the demo locally (optional)
+## 15. Run the demo locally (optional)
 
 You cannot run the Gradio demo directly in Colab (Colab doesn't expose ports
 cleanly). To use the demo:
 
-1. Download your trained checkpoint from Drive.
+1. Download your trained checkpoint from Drive (e.g. `last.ckpt` or `model.ckpt`).
 2. Clone the repo on your local machine.
 3. Place the checkpoint under `results/efficientad_aitex/EfficientAd/aitex/latest/weights/lightning/model.ckpt`.
 4. Run `python demo/app.py` and open `http://127.0.0.1:7860/`.
