@@ -26,8 +26,9 @@ The correct first direction is unsupervised anomaly detection / anomaly segmenta
 | Capability | Status | Evidence |
 |---|---|---|
 | AITEX preprocessing (CLI, blank-patch filter, image-level split) | Implemented | `scripts/prepare_aitex.py` |
-| EfficientAD training on AITEX (CLI, seed, resume) | Implemented | `scripts/train_models.py` |
-| Honest inference latency benchmark (warmup, sync, p50/p95/p99) | Implemented | `scripts/benchmark_inference.py` |
+| EfficientAD training on AITEX (CLI, seed, resume) | Implemented | `scripts/train_models.py --model efficientad` |
+| PatchCore training on AITEX (CLI, seed, no imagenette needed) | Implemented, verified end-to-end on synthetic data | `scripts/train_models.py --model patchcore` |
+| Honest inference latency benchmark (warmup, sync, p50/p95/p99) — both models | Implemented | `scripts/benchmark_inference.py` (supports `--model efficientad` and `--model patchcore`) |
 | Smoke test (imports, structure, checkpoint) | Implemented | `scripts/smoke_test.py` |
 | Gradio demo (live heatmap overlay, benchmark dashboard) | Implemented (local PoC) | `demo/app.py`, `demo/inference.py` |
 | Existing trained checkpoint (EfficientAD-small, AITEX, 10 epochs) | Real | `results/efficientad_aitex/.../model.ckpt` (epoch=9, global_step=17920) |
@@ -37,7 +38,6 @@ The correct first direction is unsupervised anomaly detection / anomaly segmenta
 
 | Capability | Status | Why |
 |---|---|---|
-| PatchCore training | Not implemented | Original plan promised it; code references remain as dead imports only. Do not claim it works. |
 | MVTec Carpet / Grid baselines | Not implemented | Original plan promised them; never executed. |
 | ONNX export | Not verified | `scripts/export_models.py` exists but was never run. No `exports/` directory. |
 | OpenVINO export | Not verified | Same as above. |
@@ -57,7 +57,7 @@ The correct first direction is unsupervised anomaly detection / anomaly segmenta
 | Feature | Status | Evidence | Notes |
 |---|---|---|---|
 | EfficientAD on AITEX | Implemented, undertrained | `results/benchmark_results.csv` shows image_AUROC=0.753, pixel_AUROC=0.680 at 10 epochs | The published EfficientAD recipe calls for 70 epochs. 75% AUROC is **barely above random** (50% = coin flip). Treat this as a sanity check that the pipeline runs, NOT as evidence the algorithm works. |
-| PatchCore | Not implemented | No working training path; `demo/inference.py` no longer imports it | Future work. |
+| PatchCore on AITEX | Implemented, verified end-to-end on synthetic data | `scripts/train_models.py --model patchcore`; verified train→eval→checkpoint round-trip on a tiny synthetic dataset (image_AUROC=0.848, pixel_AUROC=0.898 on the synthetic set — NOT a real result) | No real AITEX training run has been done yet. PatchCore is a memory-bank model (no optimizer state); "resume" is conceptually meaningless. Use `benchmark_inference.py` or `demo/inference.py` to evaluate a trained checkpoint. Does NOT require imagenette. Supports larger batch sizes (default 8). Only 1 effective epoch needed. |
 | ONNX export | Not verified | `scripts/export_models.py` exists but never produced artifacts | Do not claim. |
 | OpenVINO | Not verified | No exported artifact | Future work. |
 | Gradio demo | Implemented / fixed | `demo/app.py` | Local PoC only. Previous version crashed on any non-256×256 upload; this is fixed. |
@@ -199,6 +199,43 @@ python scripts/train_models.py \
 ```
 
 The recommended resume target is `last.ckpt` (it carries full optimizer + scheduler state).
+
+### 3b. Train PatchCore (alternative model)
+
+PatchCore is a memory-bank anomaly-detection model. Unlike EfficientAD:
+- **No imagenette required** — omit `--imagenet-dir`.
+- **Larger batch size OK** — default 8 (vs EfficientAD's forced 1).
+- **Only 1 epoch needed** — the memory bank is fitted once via `on_train_epoch_end`; passing `--epochs N` with N>1 just re-runs feature extraction N times.
+- **No optimizer state** — "resume" is conceptually meaningless (re-running `fit()` rebuilds the memory bank from scratch). To evaluate a trained PatchCore, use `benchmark_inference.py` or `demo/inference.py`.
+
+```bash
+python scripts/train_models.py \
+  --model patchcore \
+  --dataset aitex \
+  --data-dir ./datasets/aitex \
+  --output-dir ./results \
+  --epochs 1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --accelerator auto \
+  --devices 1 \
+  --precision 32-true \
+  --seed 42 \
+  --backbone wide_resnet50_2 \
+  --coreset-sampling-ratio 0.1 \
+  --save-top-k 1
+```
+
+Outputs (same layout as EfficientAD, written to `./results/patchcore_aitex/`):
+- `weights/lightning/last.ckpt` — the fitted memory bank + backbone weights.
+- `weights/lightning/model.ckpt` — best by validation `image_AUROC` (with `--epochs 1` and `--save-top-k 1`, this is effectively the same as `last.ckpt`).
+- `metrics.json` — image_AUROC, pixel_AUROC, image_F1Score, pixel_F1Score, backbone, coreset_sampling_ratio.
+- A row appended to `./results/benchmark_results.csv`.
+
+**PatchCore-specific limitations:**
+- The default backbone `wide_resnet50_2` is heavy (~130 MB). For faster training/inference on CPU or limited GPUs, use `--backbone resnet18`.
+- PatchCore's KNN search at inference can be slower than EfficientAD's forward pass, especially with a large memory bank (high `--coreset-sampling-ratio` or large train set).
+- `val_metrics` for PatchCore omit F1Score (the post-processor's adaptive threshold isn't fit until after the first validation pass, so `pred_label` isn't available). F1Score IS computed at test time and written to `metrics.json`.
 
 ### 4. Run honest inference benchmark
 

@@ -338,6 +338,64 @@ Drive — use step 10 to resume.
 
 ---
 
+## 9b. Train PatchCore (alternative model, no imagenette needed)
+
+PatchCore is a memory-bank anomaly-detection model. Unlike EfficientAD:
+- **No `--imagenet-dir` required.**
+- **Larger batch size OK** (default 8, vs EfficientAD's forced 1).
+- **Only 1 epoch needed** — the memory bank is fitted once via `on_train_epoch_end`.
+- **No optimizer state** — "resume" is conceptually meaningless. To evaluate, use `benchmark_inference.py` or `demo/inference.py`.
+
+```bash
+%%bash
+cd /content/AirbagsCV
+python scripts/train_models.py \
+  --model patchcore \
+  --dataset aitex \
+  --data-dir "$PREPARED_DATA_DIR" \
+  --output-dir "$RUNS_DIR" \
+  --epochs 1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --accelerator gpu \
+  --devices 1 \
+  --precision 16-mixed \
+  --seed 42 \
+  --backbone wide_resnet50_2 \
+  --coreset-sampling-ratio 0.1 \
+  --save-top-k 1
+```
+
+Outputs land in `$RUNS_DIR/patchcore_aitex/` (same layout as EfficientAD):
+- `weights/lightning/last.ckpt` — fitted memory bank + backbone weights.
+- `weights/lightning/model.ckpt` — best by validation `image_AUROC`.
+- `metrics.json` — all four metrics + backbone + coreset_sampling_ratio.
+
+**PatchCore-specific notes:**
+- For faster training on T4 with the default `wide_resnet50_2`, expect ~5-15 minutes for 1 epoch on the full AITEX set.
+- For CPU or limited GPUs, use `--backbone resnet18` (much smaller, ~10x faster).
+- PatchCore's KNN search at inference can be slower than EfficientAD; see the benchmark in step 11.
+- `val_metrics` for PatchCore omit F1Score (post-processor's adaptive threshold isn't fit until after the first val pass). F1Score IS computed at test time and appears in `metrics.json`.
+- To **evaluate** a trained PatchCore, do NOT pass `--resume-from-checkpoint` (it would re-run fit). Instead, use `scripts/benchmark_inference.py --model patchcore --checkpoint <path>` or `demo/app.py`.
+
+To benchmark PatchCore inference latency (step 11), set `--model patchcore` and point `--checkpoint` at the PatchCore checkpoint:
+
+```bash
+%%bash
+cd /content/AirbagsCV
+python scripts/benchmark_inference.py \
+  --checkpoint "$RUNS_DIR/patchcore_aitex/weights/lightning/model.ckpt" \
+  --model patchcore \
+  --data-dir "$PREPARED_DATA_DIR" \
+  --output-csv "$RESULTS_DIR/latency_patchcore.csv" \
+  --device cuda \
+  --batch-size 1 \
+  --warmup 20 \
+  --iterations 200
+```
+
+---
+
 ## 10. Resume training from a checkpoint (after disconnect)
 
 This is a **robust resume cell**: it remounts Drive, pulls latest repo,
@@ -538,9 +596,10 @@ zip -r /content/drive/MyDrive/AirbagsCV/airbagcv_run_outputs.zip \
 | `CUDA available: False` | GPU runtime not selected | Runtime > Change runtime type > GPU |
 | `FileNotFoundError: No NODefect_images` | Wrong `RAW_AITEX_DIR` | Check Drive path; fix env var in step 5 |
 | `FileNotFoundError: Couldn't find any class folder in datasets/imagenette` | Missing or wrong-format imagenette | Download `imagenette2-160.tgz`, extract, point `IMAGENETTE_DIR` at the `train/` subdir |
-| `FileNotFoundError: EfficientAD requires the 'imagenette' dataset at ...` | Missing `--imagenet-dir` | Add `--imagenet-dir "$IMAGENETTE_DIR"` to every train/resume command |
+| `FileNotFoundError: EfficientAD requires the 'imagenette' dataset at ...` | Missing `--imagenet-dir` | Add `--imagenet-dir "$IMAGENETTE_DIR"` to every train/resume command. (PatchCore does NOT need imagenette — switch with `--model patchcore`.) |
 | `TypeError: Folder.__init__() got an unexpected keyword argument 'image_size'` | Anomalib version mismatch | Ensure `anomalib==2.0.0` is installed (the requirements file pins it) |
-| `ValueError: train_batch_size for EfficientAd should be 1` | Wrong `--batch-size` | Use `--batch-size 1`. The script will warn and override anyway. |
+| `ValueError: train_batch_size for EfficientAd should be 1` | Wrong `--batch-size` for EfficientAD | Use `--batch-size 1`. The script will warn and override anyway. (PatchCore accepts larger batch sizes.) |
+| `_pickle.UnpicklingError: Weights only load failed... Evaluator` | PyTorch 2.6+ defaults to `weights_only=True` | The repo's `demo/inference.py` and `scripts/benchmark_inference.py` already pass `weights_only=False`. If you hit this in custom code, pass `weights_only=False` to `load_from_checkpoint`. |
 | Colab disconnects mid-training | Idle timeout (free tier) | Reconnect, run step 10 (robust resume cell) |
 | `RuntimeError: CUDA out of memory` | Batch too large or other process using GPU | Use `--batch-size 1` (required anyway). Restart runtime if memory is fragmented. |
 | `ModuleNotFoundError: No module named 'anomalib'` | Step 4 skipped or failed | Re-run `pip install -r requirements-colab.txt` |
