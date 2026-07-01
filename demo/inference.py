@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 
 # Models that are actually implemented and can be loaded.
-SUPPORTED_MODELS = {"efficientad"}
+SUPPORTED_MODELS = {"efficientad", "patchcore"}
 
 
 # --------------------------------------------------------------------------- #
@@ -97,7 +97,10 @@ def get_model(
     from anomalib.engine import Engine
     if key_name == "efficientad":
         from anomalib.models import EfficientAd
-        model = EfficientAd.load_from_checkpoint(str(checkpoint))
+        model = EfficientAd.load_from_checkpoint(str(checkpoint), weights_only=False)
+    elif key_name == "patchcore":
+        from anomalib.models import Patchcore
+        model = Patchcore.load_from_checkpoint(str(checkpoint), weights_only=False)
     else:  # pragma: no cover — guarded by SUPPORTED_MODELS above
         raise ValueError(f"Unsupported model: {model_name!r}")
 

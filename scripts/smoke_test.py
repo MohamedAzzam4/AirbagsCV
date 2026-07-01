@@ -133,7 +133,7 @@ def check_checkpoint(checkpoint: Path | None) -> bool:
         # Now try to actually load it through Anomalib.
         try:
             from anomalib.models import EfficientAd
-            _ = EfficientAd.load_from_checkpoint(str(checkpoint))
+            _ = EfficientAd.load_from_checkpoint(str(checkpoint), weights_only=False)
             logger.info("  [OK]    EfficientAd.load_from_checkpoint succeeded")
         except Exception as e:
             logger.warning("  [FAIL]  EfficientAd.load_from_checkpoint failed: %s", e)

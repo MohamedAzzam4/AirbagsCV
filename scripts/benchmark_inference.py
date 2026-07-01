@@ -28,13 +28,21 @@ What it does NOT measure
 
 Why per-image and not batched?
 ------------------------------
-Anomalib 2.0.0's EfficientAd.forward expects a tensor, and its full inference
+Anomalib 2.0.0's model forward expects a tensor, and its full inference
 graph (pre_processor -> model -> post_processor) is orchestrated by the
 Lightning Engine via `engine.predict(path=...)`. Calling `model(batch)`
 directly fails because ImageBatch is not a tensor. We therefore use
 `engine.predict` per image, which is the official supported API. This is
 slightly conservative (includes pre-processor + post-processor overhead),
 but it reflects what a real deployment calling the model would pay.
+
+Supported models
+----------------
+* `efficientad` — student-teacher network.
+* `patchcore`   — memory-bank model. Note: PatchCore inference includes a
+  KNN search against the memory bank, so its per-image latency is typically
+  higher than EfficientAD on the same hardware, especially with a large
+  coreset (high `coreset_sampling_ratio` or large train set).
 
 Outputs
 -------
@@ -62,8 +70,8 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Honest inference latency benchmark.")
     p.add_argument("--checkpoint", type=Path, required=True,
                     help="Path to a Lightning .ckpt produced by train_models.py.")
-    p.add_argument("--model", default="efficientad", choices=["efficientad"],
-                    help="Only EfficientAD is currently supported.")
+    p.add_argument("--model", default="efficientad", choices=["efficientad", "patchcore"],
+                    help="Model that produced the checkpoint. Both supported.")
     p.add_argument("--dataset", default="aitex")
     p.add_argument("--data-dir", type=Path, required=True,
                     help="Prepared dataset root (must contain test/good and test/anomaly).")
@@ -142,14 +150,27 @@ def main() -> int:
         return 2
 
     import torch
-    from anomalib.models import EfficientAd
     from anomalib.engine import Engine
 
     device = resolve_device(args.device)
     logger.info("Device: %s", device)
     logger.info("Checkpoint: %s", args.checkpoint)
+    logger.info("Model: %s", args.model)
 
-    model = EfficientAd.load_from_checkpoint(str(args.checkpoint))
+    # Load the right model class based on --model
+    # weights_only=False is required because the custom Evaluator object
+    # (with val_metrics/test_metrics) is saved in the checkpoint and PyTorch
+    # 2.6+ defaults to weights_only=True which rejects non-allowlisted classes.
+    # We trust our own checkpoints.
+    if args.model == "efficientad":
+        from anomalib.models import EfficientAd
+        model = EfficientAd.load_from_checkpoint(str(args.checkpoint), weights_only=False)
+    elif args.model == "patchcore":
+        from anomalib.models import Patchcore
+        model = Patchcore.load_from_checkpoint(str(args.checkpoint), weights_only=False)
+    else:
+        logger.error("Unsupported model: %s", args.model)
+        return 2
     model.eval()
 
     # Engine handles accelerator selection; we pass --device just for logging.

@@ -1,32 +1,47 @@
 """
 Train an anomaly-detection model on the prepared AITEX (or compatible) dataset.
 
-This is a thin wrapper around Anomalib's Engine. It intentionally supports
-only EfficientAD for now, because that is the only model that has actually
-been trained and verified in this repo. Adding PatchCore / PaDiM / etc. is
-future work — do NOT pretend they are supported.
+Supported models
+----------------
+* `efficientad` — student-teacher network, gradient-based, requires imagenette
+  for its penalty term, REQUIRES `--batch-size 1` (Anomalib 2.0.0 hard
+  constraint). Multiple epochs make sense (typical recipe: 70).
+* `patchcore`   — memory-bank model, NO gradient updates, NO imagenette
+  requirement, supports larger batch sizes. Only ONE effective epoch is
+  needed (the memory bank is fitted once via `on_train_epoch_end`). Passing
+  `--epochs N` with N>1 will simply repeat the feature-extraction pass N
+  times — useful only if you want to over-sample the train set; for a normal
+  run use `--epochs 1`.
 
 Outputs
 -------
-* Lightning checkpoints under <output-dir>/<model>_<dataset>/.../lightning/
-    - last.ckpt              (overwritten each epoch)
-    - epoch=N-step=M.ckpt    (one per epoch, save_top_k=3 keeps best 3 by image_AUROC)
-    - model.ckpt             (best by validation image_AUROC, alias of the best epoch ckpt)
-* A metrics JSON at   <output-dir>/<model>_<dataset>/metrics.json
-* A CSV row appended to <output-dir>/benchmark_results.csv
+Both models write to the same layout under `<output-dir>/<model>_<dataset>/`:
+* Lightning checkpoints under `weights/lightning/`:
+    - EfficientAD: `last.ckpt` (per-epoch), `model.ckpt` (best by val image_AUROC),
+      `epoch=N-step=M.ckpt` (top-k).
+    - PatchCore:   `last.ckpt` (single-epoch), `model.ckpt` (best by val
+      image_AUROC). PatchCore's "best" is effectively the only epoch's
+      checkpoint; save_top_k=1 is recommended to avoid duplicates.
+* `metrics.json`  — final metrics (image_AUROC, pixel_AUROC, etc.).
+* A row appended to `<output-dir>/benchmark_results.csv`.
 
 Note on "latency"
 -----------------
-The wall-clock time of `engine.test()` reported by older versions of this
-script was MISLABELLED as inference latency. It is not. It includes
-dataloader overhead, metric computation, and batch dispatch. Use
-`scripts/benchmark_inference.py` for honest per-image latency.
+The wall-clock time of `engine.test()` reported by this script is NOT
+inference latency. It includes dataloader overhead, metric computation, and
+batch dispatch. Use `scripts/benchmark_inference.py` for honest per-image
+latency.
 
 Resume
 ------
-Pass --resume-from-checkpoint to continue from an existing .ckpt. Lightning
-restores optimizer state, LR scheduler, and epoch counter. The
-ModelCheckpoint callback's `last.ckpt` is the recommended resume target.
+Pass `--resume-from-checkpoint` to continue from an existing `.ckpt`.
+For EfficientAD this restores optimizer + scheduler + epoch counter (use
+`last.ckpt`). For PatchCore, "resume" is conceptually meaningless because
+the model has no optimizer state — the memory bank IS the trained state.
+Loading a PatchCore checkpoint and calling `engine.fit()` again will
+re-extract features and rebuild the memory bank from scratch. If you want
+to evaluate a trained PatchCore model, just use `benchmark_inference.py`
+or `demo/inference.py` with the checkpoint path.
 """
 from __future__ import annotations
 
@@ -42,13 +57,19 @@ import pandas as pd
 logger = logging.getLogger("train_models")
 
 
+SUPPORTED_MODELS = ("efficientad", "patchcore")
+
+
 # --------------------------------------------------------------------------- #
 # CLI                                                                         #
 # --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train EfficientAD on AITEX-style data.")
-    p.add_argument("--model", default="efficientad", choices=["efficientad"],
-                    help="Only EfficientAD is currently supported.")
+    p = argparse.ArgumentParser(description="Train an anomaly-detection model on AITEX-style data.")
+    p.add_argument("--model", default="efficientad", choices=list(SUPPORTED_MODELS),
+                    help="Model to train. 'efficientad': student-teacher, requires "
+                         "--imagenet-dir, forces --batch-size 1. 'patchcore': "
+                         "memory-bank, no imagenette, supports larger batch sizes, "
+                         "only needs 1 epoch.")
     p.add_argument("--dataset", default="aitex",
                     help="Dataset name (used in output path only).")
     p.add_argument("--data-dir", type=Path, required=True,
@@ -56,11 +77,14 @@ def parse_args() -> argparse.Namespace:
                          "test/anomaly, ground_truth/anomaly).")
     p.add_argument("--output-dir", type=Path, required=True,
                     help="Where checkpoints and metrics are written.")
-    p.add_argument("--epochs", type=int, default=70)
-    p.add_argument("--batch-size", type=int, default=1,
-                    help="EfficientAD REQUIRES batch_size=1 (Anomalib 2.0.0 hard "
-                         "constraint, also matches the original paper). Any other "
-                         "value triggers a warning and is overridden to 1.")
+    p.add_argument("--epochs", type=int, default=None,
+                    help="Number of epochs. Default depends on model: efficientad=70, "
+                         "patchcore=1. PatchCore only needs 1 epoch (memory bank is "
+                         "fitted once); passing N>1 re-runs feature extraction N times.")
+    p.add_argument("--batch-size", type=int, default=None,
+                    help="Train batch size. Default depends on model: efficientad=1 "
+                         "(hard Anomalib 2.0.0 constraint), patchcore=8. EfficientAD "
+                         "will warn+override any other value to 1.")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--accelerator", default="auto",
                     choices=["auto", "gpu", "cpu", "cuda", "mps"])
@@ -72,16 +96,29 @@ def parse_args() -> argparse.Namespace:
                     help="Input image size (Anomalib pre-processor will resize).")
     p.add_argument("--imagenet-dir", type=Path,
                     default=Path("./datasets/imagenette"),
-                    help="Path to ImageFolder-format 'imagenette' dataset required by "
-                         "EfficientAD's penalty term. Download from "
-                         "https://github.com/fastai/imagenette and pass --imagenet-dir.")
+                    help="Path to ImageFolder-format 'imagenette' dataset. "
+                         "REQUIRED for efficientad (penalty term). NOT used by "
+                         "patchcore.")
+    # PatchCore-specific
+    p.add_argument("--backbone", default="wide_resnet50_2",
+                    help="PatchCore backbone (ignored for efficientad). "
+                         "Default wide_resnet50_2; alternatives: resnet18, "
+                         "resnet50, wide_resnet50_2.")
+    p.add_argument("--coreset-sampling-ratio", type=float, default=0.1,
+                    help="PatchCore coreset subsampling ratio in [0, 1]. "
+                         "Lower = smaller memory bank = faster inference, "
+                         "potentially lower recall. Ignored for efficientad.")
     p.add_argument("--resume-from-checkpoint", type=Path, default=None,
-                    help="Path to a Lightning .ckpt to resume from. Recommended: "
-                         "the last.ckpt produced by a previous run.")
+                    help="Path to a Lightning .ckpt to resume from. Recommended "
+                         "for efficientad: last.ckpt. For patchcore, resume is "
+                         "conceptually meaningless (no optimizer state); the "
+                         "checkpoint will be loaded but training re-runs feature "
+                         "extraction from scratch.")
     p.add_argument("--limit-train-batches", type=float, default=1.0,
                     help="Lightning limit_train_batches (debug only).")
     p.add_argument("--save-top-k", type=int, default=3,
-                    help="Number of best-by-val-image_AUROC checkpoints to keep.")
+                    help="Number of best-by-val-image_AUROC checkpoints to keep. "
+                         "For patchcore, recommend 1 (only 1 epoch is meaningful).")
     p.add_argument("--log-level", default="INFO",
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p.parse_args()
@@ -109,68 +146,129 @@ def verify_data_dir(data_dir: Path) -> None:
         )
 
 
-def build_model(args: argparse.Namespace):
-    """Instantiate the Anomalib model. Only EfficientAD is wired up.
+def resolve_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill in model-specific defaults for --epochs and --batch-size if not set."""
+    if args.epochs is None:
+        args.epochs = 70 if args.model == "efficientad" else 1
+        logger.info("Defaulting --epochs to %d for model=%s", args.epochs, args.model)
+    if args.batch_size is None:
+        args.batch_size = 1 if args.model == "efficientad" else 8
+        logger.info("Defaulting --batch-size to %d for model=%s", args.batch_size, args.model)
+    return args
 
-    We attach a custom Evaluator with val_metrics so that image_AUROC is
-    logged during the validation loop. Without val_metrics, no metric is
-    logged during training, and ModelCheckpoint(monitor='image_AUROC')
-    cannot select a best checkpoint.
+
+def build_model(args: argparse.Namespace):
+    """Instantiate the Anomalib model.
+
+    Both models get a custom Evaluator with val_metrics AND test_metrics so
+    that:
+      - image_AUROC is logged during validation -> ModelCheckpoint can
+        monitor it and select a best checkpoint.
+      - All four metrics (image_AUROC, image_F1Score, pixel_AUROC,
+        pixel_F1Score) are computed at test time and written to metrics.json.
+
+    Note on val_metrics for PatchCore
+    ---------------------------------
+    PatchCore's first validation pass runs before the post-processor's
+    F1AdaptiveThreshold has been fit, so `pred_label` is not yet available.
+    We therefore use only `image_AUROC` and `pixel_AUROC` (which depend on
+    `pred_score` and `anomaly_map` respectively — both always available)
+    for PatchCore's val_metrics. F1Score IS included in test_metrics
+    (the post-processor has been fit by test time). EfficientAD's
+    post-processor fits during the first val pass, so F1Score is safe in
+    its val_metrics.
     """
-    from anomalib.models import EfficientAd
     from anomalib.metrics import Evaluator, AUROC, F1Score
 
-    # EfficientAD requires the imagenette dataset for its penalty term.
-    imagenet_dir = args.imagenet_dir
-    if not imagenet_dir.exists():
-        raise FileNotFoundError(
-            f"EfficientAD requires the 'imagenette' dataset at {imagenet_dir}. "
-            f"Download it from https://github.com/fastai/imagenette "
-            f"(the 'imagenette2' tarball, ~1.5 GB) and extract it, then pass "
-            f"--imagenet-dir <path>. The folder must contain class subdirectories."
-        )
-    subdirs = [p for p in imagenet_dir.iterdir() if p.is_dir()]
-    if not subdirs:
-        raise FileNotFoundError(
-            f"--imagenet-dir {imagenet_dir} exists but has no class subdirectories. "
-            f"It must be an ImageFolder layout (e.g. imagenette2/train/<class>/*.JPEG)."
+    # Test metrics — same for both models, computed at test time.
+    test_image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
+    test_image_f1score = F1Score(fields=["pred_label", "gt_label"], prefix="image_")
+    test_pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
+    test_pixel_f1score = F1Score(fields=["pred_mask", "gt_mask"], prefix="pixel_", strict=False)
+    test_metrics = [test_image_auroc, test_image_f1score, test_pixel_auroc, test_pixel_f1score]
+
+    if args.model == "efficientad":
+        from anomalib.models import EfficientAd
+
+        # EfficientAD requires the imagenette dataset for its penalty term.
+        imagenet_dir = args.imagenet_dir
+        if not imagenet_dir.exists():
+            raise FileNotFoundError(
+                f"EfficientAD requires the 'imagenette' dataset at {imagenet_dir}. "
+                f"Download it from https://github.com/fastai/imagenette "
+                f"(the 'imagenette2' tarball, ~1.5 GB) and extract it, then pass "
+                f"--imagenet-dir <path>. The folder must contain class subdirectories. "
+                f"(PatchCore does NOT require imagenette — you can switch with --model patchcore.)"
+            )
+        subdirs = [p for p in imagenet_dir.iterdir() if p.is_dir()]
+        if not subdirs:
+            raise FileNotFoundError(
+                f"--imagenet-dir {imagenet_dir} exists but has no class subdirectories. "
+                f"It must be an ImageFolder layout (e.g. imagenette2/train/<class>/*.JPEG)."
+            )
+
+        # EfficientAD: F1Score is safe in val_metrics (post-processor fits fast).
+        val_image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
+        val_image_f1score = F1Score(fields=["pred_label", "gt_label"], prefix="image_")
+        val_pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
+        val_metrics = [val_image_auroc, val_image_f1score, val_pixel_auroc]
+        val_evaluator = Evaluator(val_metrics=val_metrics, test_metrics=test_metrics)
+
+        return EfficientAd(
+            model_size="small",
+            teacher_out_channels=384,
+            lr=1e-4,
+            weight_decay=1e-5,
+            padding=False,
+            pad_maps=True,
+            imagenet_dir=str(imagenet_dir),
+            evaluator=val_evaluator,
         )
 
-    # Validation metrics — needed so ModelCheckpoint can monitor image_AUROC.
-    image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
-    image_f1score = F1Score(fields=["pred_label", "gt_label"], prefix="image_")
-    pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
-    val_evaluator = Evaluator(
-        val_metrics=[image_auroc, image_f1score, pixel_auroc],
-    )
+    if args.model == "patchcore":
+        from anomalib.models import Patchcore
 
-    return EfficientAd(
-        model_size="small",
-        teacher_out_channels=384,
-        lr=1e-4,
-        weight_decay=1e-5,
-        padding=False,
-        pad_maps=True,
-        imagenet_dir=str(imagenet_dir),
-        evaluator=val_evaluator,
-    )
+        if not 0.0 < args.coreset_sampling_ratio <= 1.0:
+            raise ValueError(
+                f"--coreset-sampling-ratio must be in (0, 1], got {args.coreset_sampling_ratio}"
+            )
+        logger.info(
+            "Building Patchcore: backbone=%s, coreset_sampling_ratio=%.2f, num_neighbors=9",
+            args.backbone, args.coreset_sampling_ratio,
+        )
+        # PatchCore: omit F1Score from val_metrics (pred_label not available
+        # until post-processor is fit, which happens after the first val pass).
+        val_image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
+        val_pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
+        val_metrics = [val_image_auroc, val_pixel_auroc]
+        val_evaluator = Evaluator(val_metrics=val_metrics, test_metrics=test_metrics)
+        return Patchcore(
+            backbone=args.backbone,
+            layers=["layer2", "layer3"],
+            pre_trained=True,
+            coreset_sampling_ratio=args.coreset_sampling_ratio,
+            num_neighbors=9,
+            evaluator=val_evaluator,
+        )
+
+    raise ValueError(f"Unsupported model: {args.model!r}. Supported: {SUPPORTED_MODELS}")
 
 
 def build_datamodule(args: argparse.Namespace):
     from anomalib.data import Folder
 
-    # NOTE 1: Anomalib 2.0.0's Folder does NOT take image_size or task; those
-    # are owned by the model's pre_processor / post_processor.
-    # NOTE 2: EfficientAd in Anomalib 2.0.0 REQUIRES train_batch_size=1.
-    # The original EfficientAD paper also uses batch size 1 for the
-    # student-teacher update. We hard-enforce this here.
+    # EfficientAd in Anomalib 2.0.0 REQUIRES train_batch_size=1.
+    # PatchCore supports larger batch sizes (default 8).
     if args.model == "efficientad" and args.batch_size != 1:
         logger.warning(
             "EfficientAd requires train_batch_size=1 in Anomalib 2.0.0; "
             "ignoring --batch-size=%d and using 1.",
             args.batch_size,
         )
-    train_bs = 1 if args.model == "efficientad" else args.batch_size
+        train_bs = 1
+    else:
+        train_bs = args.batch_size
+
     return Folder(
         name=args.dataset,
         root=str(args.data_dir),
@@ -191,10 +289,8 @@ def find_latest_checkpoint(run_dir: Path) -> Path | None:
     Prefers last.ckpt if it exists (Lightning's canonical resume target);
     otherwise falls back to the most recently modified .ckpt.
     """
-    # Walk run_dir for *.ckpt. Look for last.ckpt first.
     last_ckpts = list(run_dir.rglob("last.ckpt"))
     if last_ckpts:
-        # If multiple, pick the most recently modified.
         last_ckpts.sort(key=lambda p: p.stat().st_mtime)
         return last_ckpts[-1]
 
@@ -206,14 +302,7 @@ def find_latest_checkpoint(run_dir: Path) -> Path | None:
 
 
 def find_best_checkpoint(run_dir: Path) -> Path | None:
-    """Find the best checkpoint (monitored by val/image_AUROC).
-
-    Lightning names best checkpoints as 'model.ckpt' (when filename='model'
-    and monitor is set) OR 'epoch=N-step=M.ckpt'. We look for 'model.ckpt'
-    first, then any non-last.ckpt checkpoint.
-    """
-    # The ModelCheckpoint with filename='model' produces model.ckpt as the
-    # best checkpoint (and model-vN.ckpt for subsequent top-k).
+    """Find the best checkpoint (monitored by val/image_AUROC)."""
     model_ckpts = list(run_dir.rglob("model.ckpt")) + list(run_dir.rglob("model-v*.ckpt"))
     if model_ckpts:
         model_ckpts.sort(key=lambda p: p.stat().st_mtime)
@@ -233,7 +322,7 @@ def extract_metric(test_results: dict, key: str) -> float | None:
     return None
 
 
-def build_checkpoint_callback(run_dir: Path, save_top_k: int):
+def build_checkpoint_callback(run_dir: Path, save_top_k: int, model_name: str):
     """Build a Lightning ModelCheckpoint callback.
 
     Config:
@@ -241,13 +330,17 @@ def build_checkpoint_callback(run_dir: Path, save_top_k: int):
       - every_n_epochs=1         -> one checkpoint per epoch
       - monitor='image_AUROC'    -> best by validation image AUROC
       - mode='max'               -> higher AUROC is better
-      - save_top_k=save_top_k    -> keep best N
+      - save_top_k=save_top_k    -> keep best N (1 recommended for patchcore)
       - filename='model'         -> best ckpt is model.ckpt
-      - save_weights_only=False  -> full state (optimizer, scheduler) for resume
+      - save_weights_only=False  -> full state for resume
 
     Anomalib's Engine will NOT add its own ModelCheckpoint if one is passed
-    via callbacks (see Engine._setup_anomalib_callbacks). So this is safe
-    and non-conflicting.
+    via callbacks (see Engine._setup_anomalib_callbacks). Safe + non-conflicting.
+
+    For PatchCore: the model is a memory-bank model with no optimizer state.
+    save_weights_only=False still works fine (it just saves the model state
+    + the _is_fitted buffer + memory bank, no optimizer because
+    configure_optimizers() returns None).
     """
     from lightning.pytorch.callbacks import ModelCheckpoint
 
@@ -272,6 +365,7 @@ def build_checkpoint_callback(run_dir: Path, save_top_k: int):
 def main() -> int:
     args = parse_args()
     setup_logging(args.log_level)
+    args = resolve_defaults(args)
 
     try:
         verify_data_dir(args.data_dir)
@@ -287,18 +381,19 @@ def main() -> int:
         from lightning.pytorch import seed_everything
         seed_everything(args.seed, workers=True)
 
-    # Imports must happen after seed (some are heavy).
     from anomalib.engine import Engine
 
     run_dir = args.output_dir / f"{args.model}_{args.dataset}"
     run_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Run directory: %s", run_dir)
+    logger.info("Model: %s, epochs: %d, batch_size: %d",
+                args.model, args.epochs, args.batch_size)
 
     model = build_model(args)
     datamodule = build_datamodule(args)
 
     # Build the explicit checkpoint callback.
-    ckpt_callback = build_checkpoint_callback(run_dir, args.save_top_k)
+    ckpt_callback = build_checkpoint_callback(run_dir, args.save_top_k, args.model)
 
     resume_path = None
     if args.resume_from_checkpoint is not None:
@@ -307,6 +402,14 @@ def main() -> int:
             return 2
         resume_path = str(args.resume_from_checkpoint)
         logger.info("Resuming from checkpoint: %s", resume_path)
+        if args.model == "patchcore":
+            logger.warning(
+                "PatchCore resume is conceptually meaningless: there is no "
+                "optimizer state to restore. The checkpoint will be loaded, "
+                "but engine.fit() will re-extract features and rebuild the "
+                "memory bank from scratch. If you only want to evaluate, use "
+                "scripts/benchmark_inference.py or demo/inference.py instead."
+            )
     else:
         existing = find_latest_checkpoint(run_dir)
         if existing is not None:
@@ -345,11 +448,12 @@ def main() -> int:
     logger.info("Evaluation wall-clock (includes dataloader + metrics): %.1f s", eval_seconds)
 
     # --- Persist results ---------------------------------------------------
+    actual_train_bs = 1 if args.model == "efficientad" else args.batch_size
     metrics = {
         "model": args.model,
         "dataset": args.dataset,
         "epochs": args.epochs,
-        "batch_size": 1 if args.model == "efficientad" else args.batch_size,
+        "batch_size": actual_train_bs,
         "image_size": args.image_size,
         "seed": args.seed,
         "train_seconds": round(train_seconds, 2),
@@ -364,6 +468,11 @@ def main() -> int:
             "scripts/benchmark_inference.py for honest latency."
         ),
     }
+    # Model-specific extras
+    if args.model == "patchcore":
+        metrics["backbone"] = args.backbone
+        metrics["coreset_sampling_ratio"] = args.coreset_sampling_ratio
+
     metrics_path = run_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2))
     logger.info("Metrics written to: %s", metrics_path)
@@ -398,6 +507,13 @@ def main() -> int:
     print(f"EPOCH_CHECKPOINT_DIR={ckpt_dir}")
     print(f"METRICS_JSON_PATH={metrics_path}")
     print(f"METRICS_CSV_PATH={csv_path}")
+    if args.model == "patchcore":
+        print()
+        print("NOTE: PatchCore is a memory-bank model. The 'checkpoint' is the")
+        print("fitted memory bank + backbone weights. There is no optimizer state.")
+        print("To evaluate, use scripts/benchmark_inference.py or demo/inference.py")
+        print("with this checkpoint path. To 'resume' is conceptually meaningless")
+        print("(re-running fit() rebuilds the memory bank from scratch).")
     print("=" * 70 + "\n")
     return 0
 

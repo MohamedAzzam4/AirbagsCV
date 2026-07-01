@@ -36,9 +36,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "results"
 BENCHMARK_CSV = RESULTS_DIR / "benchmark_results.csv"
 
-# Models actually trained in this repo. PatchCore was previously listed but is
-# NOT implemented. Do not add it back until it is.
-AVAILABLE_MODELS = ["EfficientAD"]
+# Models actually trained in this repo. Both EfficientAD and PatchCore are
+# supported as of this phase. PatchCore is a memory-bank model; EfficientAD
+# is a student-teacher gradient-based model.
+AVAILABLE_MODELS = ["EfficientAD", "PatchCore"]
 AVAILABLE_DATASETS = ["AITEX"]
 
 
@@ -191,14 +192,28 @@ with gr.Blocks(css=CSS, theme=gr.themes.Soft()) as app:
                 time, anything that does not look "normal" produces a high anomaly
                 score.
 
-                **EfficientAD** (the only model currently trained in this repo) is a
-                student-teacher network:
+                **EfficientAD** (student-teacher network, gradient-based):
                 - A pre-trained *teacher* network extracts features.
                 - A *student* network learns to mimic the teacher on normal data.
                 - On defective regions the student diverges from the teacher ->
                   anomaly signal.
                 - A small autoencoder adds a second anomaly signal (reconstruction
                   error).
+                - Requires the `imagenette` dataset for its penalty term.
+                - Forces `batch_size=1` (Anomalib 2.0.0 constraint).
+                - Multi-epoch training (typical recipe: 70 epochs).
+
+                **PatchCore** (memory-bank model, no gradient updates):
+                - A pre-trained backbone (default: wide_resnet50_2) extracts
+                  feature embeddings from normal training images.
+                - Coreset subsampling (default: 10%) keeps only the most
+                  representative embeddings -> the "memory bank".
+                - At inference, each test image's embedding is compared to the
+                  memory bank via KNN (default: 9 neighbors). Large distance =
+                  anomaly.
+                - Does NOT require imagenette.
+                - Supports larger batch sizes (default: 8).
+                - Only 1 effective epoch is needed (the memory bank is fitted once).
 
                 ### Why this matters for airbags
                 Real defect samples are rare and the factory has not shared data.
@@ -206,11 +221,12 @@ with gr.Blocks(css=CSS, theme=gr.themes.Soft()) as app:
                 can capture in minutes of normal production.
 
                 ### What is NOT in this demo
-                - PatchCore is referenced in the research notes but is NOT trained
-                  in this repo.
-                - No real airbag data was used.
-                - The latency reported here is not industrial line-scan throughput.
+                - No real airbag data was used (only AITEX textile proxy).
+                - The latency reported by the benchmark is not industrial
+                  line-scan throughput.
                 - No threshold calibration against real defect rates has been done.
+                - PatchCore's KNN search can make per-image inference slower than
+                  EfficientAD, especially with a large memory bank.
                 """
             )
 
