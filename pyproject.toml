@@ -53,3 +53,6 @@ target-version = ["py310"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"'). Used for EfficientAD regression test that takes ~3-6 minutes on CPU.",
+]

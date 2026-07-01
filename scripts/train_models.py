@@ -167,25 +167,46 @@ def build_model(args: argparse.Namespace):
       - All four metrics (image_AUROC, image_F1Score, pixel_AUROC,
         pixel_F1Score) are computed at test time and written to metrics.json.
 
-    Note on val_metrics for PatchCore
-    ---------------------------------
-    PatchCore's first validation pass runs before the post-processor's
-    F1AdaptiveThreshold has been fit, so `pred_label` is not yet available.
+    IMPORTANT: F1Score is NOT safe in val_metrics for either model
+    ------------------------------------------------------------------
+    Both EfficientAD and PatchCore share the same root cause: the
+    post-processor's F1AdaptiveThreshold is not fit until AFTER the first
+    validation pass completes. F1Score requires `pred_label`, which is set
+    by the post-processor. During the first validation pass `pred_label` is
+    None, so F1Score.update() raises:
+        ValueError: Passed dataclass instance does not have a value for
+        field with name pred_label
+
     We therefore use only `image_AUROC` and `pixel_AUROC` (which depend on
     `pred_score` and `anomaly_map` respectively — both always available)
-    for PatchCore's val_metrics. F1Score IS included in test_metrics
-    (the post-processor has been fit by test time). EfficientAD's
-    post-processor fits during the first val pass, so F1Score is safe in
-    its val_metrics.
+    for val_metrics for BOTH models. F1Score IS included in test_metrics
+    for both models (the post-processor has been fit by test time).
+
+    This was discovered the hard way: the original code claimed F1Score was
+    safe for EfficientAD's val_metrics, but a real Colab training run
+    crashed with the ValueError above. Do NOT re-add F1Score to val_metrics
+    without first verifying the post-processor is fit before the first val
+    batch.
     """
     from anomalib.metrics import Evaluator, AUROC, F1Score
 
     # Test metrics — same for both models, computed at test time.
+    # F1Score IS safe here because the post-processor's F1AdaptiveThreshold
+    # is fit during the validation loop, so by test time pred_label/pred_mask
+    # are populated.
     test_image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
     test_image_f1score = F1Score(fields=["pred_label", "gt_label"], prefix="image_")
     test_pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
     test_pixel_f1score = F1Score(fields=["pred_mask", "gt_mask"], prefix="pixel_", strict=False)
     test_metrics = [test_image_auroc, test_image_f1score, test_pixel_auroc, test_pixel_f1score]
+
+    # Validation metrics — SAME for both models.
+    # F1Score is OMITTED because pred_label/pred_mask are not available
+    # until the post-processor is fit, which happens after the first val pass.
+    # See the docstring above for the full explanation.
+    val_image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
+    val_pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
+    val_metrics = [val_image_auroc, val_pixel_auroc]
 
     if args.model == "efficientad":
         from anomalib.models import EfficientAd
@@ -207,13 +228,7 @@ def build_model(args: argparse.Namespace):
                 f"It must be an ImageFolder layout (e.g. imagenette2/train/<class>/*.JPEG)."
             )
 
-        # EfficientAD: F1Score is safe in val_metrics (post-processor fits fast).
-        val_image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
-        val_image_f1score = F1Score(fields=["pred_label", "gt_label"], prefix="image_")
-        val_pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
-        val_metrics = [val_image_auroc, val_image_f1score, val_pixel_auroc]
         val_evaluator = Evaluator(val_metrics=val_metrics, test_metrics=test_metrics)
-
         return EfficientAd(
             model_size="small",
             teacher_out_channels=384,
@@ -236,11 +251,6 @@ def build_model(args: argparse.Namespace):
             "Building Patchcore: backbone=%s, coreset_sampling_ratio=%.2f, num_neighbors=9",
             args.backbone, args.coreset_sampling_ratio,
         )
-        # PatchCore: omit F1Score from val_metrics (pred_label not available
-        # until post-processor is fit, which happens after the first val pass).
-        val_image_auroc = AUROC(fields=["pred_score", "gt_label"], prefix="image_")
-        val_pixel_auroc = AUROC(fields=["anomaly_map", "gt_mask"], prefix="pixel_", strict=False)
-        val_metrics = [val_image_auroc, val_pixel_auroc]
         val_evaluator = Evaluator(val_metrics=val_metrics, test_metrics=test_metrics)
         return Patchcore(
             backbone=args.backbone,
@@ -252,6 +262,47 @@ def build_model(args: argparse.Namespace):
         )
 
     raise ValueError(f"Unsupported model: {args.model!r}. Supported: {SUPPORTED_MODELS}")
+
+
+def sanitize_hparams(model, model_name: str) -> list[str]:
+    """Remove non-picklable objects from the Lightning module's hparams.
+
+    Anomalib 2.0.0 saves the `evaluator` (an nn.Module) as a hyperparameter.
+    When Lightning tries to serialize the full hparams dict into the
+    checkpoint, this can trigger:
+        NotImplementedError: _SingleProcessDataLoaderIter cannot be pickled
+    because the Evaluator transitively holds references to dataloader
+    state in some Anomalib versions.
+
+    We strip `evaluator` (and any other nn.Module-valued hparams) from
+    `model._hparams` and `model._hparams_initial` BEFORE engine.fit() so the
+    checkpoint's hparams section only contains picklable scalars/strings.
+
+    The Evaluator object itself is still saved in the checkpoint's state_dict
+    (because it's a submodule), so model loading still works. We only remove
+    it from the *hparams metadata* section.
+
+    Returns the list of removed keys for logging.
+    """
+    import torch.nn as nn
+
+    removed: list[str] = []
+    for store_name in ("_hparams", "_hparams_initial"):
+        store = getattr(model, store_name, None)
+        if not isinstance(store, dict):
+            continue
+        for key in list(store.keys()):
+            val = store[key]
+            if isinstance(val, nn.Module):
+                logger.info(
+                    "[%s] removing non-picklable hparam %r from %s (type=%s)",
+                    model_name, key, store_name, type(val).__name__,
+                )
+                del store[key]
+                if key not in removed:
+                    removed.append(key)
+    return removed
+
 
 
 def build_datamodule(args: argparse.Namespace):
@@ -326,21 +377,51 @@ def build_checkpoint_callback(run_dir: Path, save_top_k: int, model_name: str):
     """Build a Lightning ModelCheckpoint callback.
 
     Config:
-      - save_last=True           -> always have last.ckpt for resume
+      - save_last=True           -> always have last.ckpt
       - every_n_epochs=1         -> one checkpoint per epoch
       - monitor='image_AUROC'    -> best by validation image AUROC
       - mode='max'               -> higher AUROC is better
       - save_top_k=save_top_k    -> keep best N (1 recommended for patchcore)
       - filename='model'         -> best ckpt is model.ckpt
-      - save_weights_only=False  -> full state for resume
+      - save_weights_only=True   -> see note below
 
     Anomalib's Engine will NOT add its own ModelCheckpoint if one is passed
     via callbacks (see Engine._setup_anomalib_callbacks). Safe + non-conflicting.
 
-    For PatchCore: the model is a memory-bank model with no optimizer state.
-    save_weights_only=False still works fine (it just saves the model state
-    + the _is_fitted buffer + memory bank, no optimizer because
-    configure_optimizers() returns None).
+    IMPORTANT: why save_weights_only=True
+    --------------------------------------
+    A real Colab training run crashed with:
+        NotImplementedError: _SingleProcessDataLoaderIter cannot be pickled
+    when Lightning tried to save the full trainer state (optimizer_states,
+    lr_scheduler_states, loops, callbacks) into the checkpoint. The root cause
+    is that Anomalib 2.0.0's Evaluator callback transitively holds a
+    reference to a dataloader iterator that is not picklable.
+
+    Setting save_weights_only=True makes Lightning save ONLY:
+      - model.state_dict() (backbone + memory bank / student-teacher weights)
+      - the LightningModule's hparams (after sanitize_hparams strips the
+        Evaluator nn.Module from them)
+      - the model's registered buffers (e.g. PatchCore's _is_fitted)
+
+    It does NOT save optimizer_states, lr_schedulers, loops, or the
+    dataloader iterator. This means:
+      ✅ Checkpoint saving succeeds (no pickle error).
+      ✅ The checkpoint is loadable for inference and evaluation
+         (benchmark_inference.py, demo/inference.py both work).
+      ❌ Full optimizer-state resume is NOT available. Passing
+         --resume-from-checkpoint to EfficientAD will load the model weights
+         but Lightning will restart the optimizer and LR scheduler from
+         scratch (epoch 0, initial LR). For EfficientAD this means resumed
+         training is effectively a warm-restart, not a true continuation.
+      ⚠️ For PatchCore this does not matter — PatchCore has no optimizer
+         state anyway (configure_optimizers() returns None), so
+         save_weights_only=True loses nothing.
+
+    If you need true optimizer-state resume for EfficientAD in the future,
+    you must either (a) upgrade to a newer Anomalib version where the
+    Evaluator is picklable, or (b) fork Anomalib and make the Evaluator
+    detach from the dataloader before checkpointing. Both are out of scope
+    for this phase.
     """
     from lightning.pytorch.callbacks import ModelCheckpoint
 
@@ -354,7 +435,7 @@ def build_checkpoint_callback(run_dir: Path, save_top_k: int, model_name: str):
         save_last=True,
         save_top_k=save_top_k,
         every_n_epochs=1,
-        save_weights_only=False,
+        save_weights_only=True,
         auto_insert_metric_name=False,
     )
 
@@ -392,6 +473,18 @@ def main() -> int:
     model = build_model(args)
     datamodule = build_datamodule(args)
 
+    # Sanitize non-picklable hparams (Evaluator nn.Module) BEFORE engine.fit().
+    # This prevents the `_SingleProcessDataLoaderIter cannot be pickled` crash
+    # when Lightning serializes hparams into the checkpoint.
+    removed_keys = sanitize_hparams(model, args.model)
+    if removed_keys:
+        logger.info(
+            "Sanitized non-picklable hparams from %s model: %s "
+            "(these are still saved inside state_dict as submodules; only the "
+            "hparams metadata section is affected).",
+            args.model, removed_keys,
+        )
+
     # Build the explicit checkpoint callback.
     ckpt_callback = build_checkpoint_callback(run_dir, args.save_top_k, args.model)
 
@@ -408,6 +501,18 @@ def main() -> int:
                 "optimizer state to restore. The checkpoint will be loaded, "
                 "but engine.fit() will re-extract features and rebuild the "
                 "memory bank from scratch. If you only want to evaluate, use "
+                "scripts/benchmark_inference.py or demo/inference.py instead."
+            )
+        elif args.model == "efficientad":
+            logger.warning(
+                "EfficientAD resume is a WARM RESTART, not a true continuation: "
+                "checkpoints are saved with save_weights_only=True (see "
+                "build_checkpoint_callback docstring), so only model weights "
+                "are restored. The optimizer state, LR scheduler state, and "
+                "epoch counter are NOT restored — Lightning will restart them "
+                "from epoch 0 with the initial LR. For full optimizer-state "
+                "resume you would need a newer Anomalib version where the "
+                "Evaluator is picklable. For pure evaluation, use "
                 "scripts/benchmark_inference.py or demo/inference.py instead."
             )
     else:
@@ -514,6 +619,15 @@ def main() -> int:
         print("To evaluate, use scripts/benchmark_inference.py or demo/inference.py")
         print("with this checkpoint path. To 'resume' is conceptually meaningless")
         print("(re-running fit() rebuilds the memory bank from scratch).")
+    elif args.model == "efficientad":
+        print()
+        print("NOTE: EfficientAD checkpoints are saved with save_weights_only=True")
+        print("(weights + buffers + sanitized hparams only; no optimizer/LR state).")
+        print("The checkpoint is loadable for inference and evaluation via")
+        print("scripts/benchmark_inference.py or demo/inference.py.")
+        print("--resume-from-checkpoint will load the weights but restart the")
+        print("optimizer and epoch counter from scratch (warm restart, not a true")
+        print("continuation). See build_checkpoint_callback docstring for details.")
     print("=" * 70 + "\n")
     return 0
 
