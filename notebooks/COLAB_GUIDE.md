@@ -119,6 +119,32 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
    If it prints `False`, you have a CPU-only torch. Uninstall and reinstall
    with the correct index URL.
 
+**If you see `ImportError: cannot import name 'xxx' from 'gradio'` or
+`OSError: Could not find file ...` from open_clip:**
+
+This is almost certainly a **HuggingFace stack version conflict**. Anomalib
+2.0.0's `open_clip` dependency pulls in `huggingface-hub`, `transformers`,
+and `tokenizers`, and newer versions of these packages break both gradio
+imports and open_clip weight loading. The `requirements-colab.txt` file
+pins the verified-compatible versions:
+
+```
+huggingface-hub==0.25.2
+transformers==4.44.2
+tokenizers==0.19.1
+```
+
+If Colab's preinstalled versions override these (check with
+`pip show huggingface-hub transformers tokenizers`), force-reinstall them:
+
+```bash
+%%bash
+pip install --force-reinstall --no-deps \
+  huggingface-hub==0.25.2 transformers==4.44.2 tokenizers==0.19.1
+```
+
+Then `Runtime > Restart session` and re-run the smoke test (step 6).
+
 ---
 
 ## 5. Define paths
@@ -328,10 +354,12 @@ METRICS_CSV_PATH=/content/drive/MyDrive/AirbagsCV/runs/benchmark_results.csv
 ======================================================================
 ```
 
-Checkpoints saved per epoch:
-- `last.ckpt` — always overwritten each epoch; the **recommended resume target**.
+Checkpoints saved per epoch (save_weights_only=True — see note below):
+- `last.ckpt` — always overwritten each epoch; the **recommended resume target** (warm restart — weights only, no optimizer state).
 - `model.ckpt` — best by validation `image_AUROC`.
 - `epoch=N-step=M.ckpt` — top-3 best epoch checkpoints.
+
+**Note on save_weights_only=True:** Anomalib 2.0.0's Evaluator callback is not picklable, which crashes full-state checkpointing with `NotImplementedError: _SingleProcessDataLoaderIter cannot be pickled`. The repo works around this by saving weights + buffers + sanitized hparams only. The checkpoint is fully loadable for inference and evaluation. `--resume-from-checkpoint` will load the weights but restart the optimizer and epoch counter from scratch (warm restart, not a true continuation). See `build_checkpoint_callback` docstring in `train_models.py` for details.
 
 If Colab disconnects before training finishes, the latest `last.ckpt` is on
 Drive — use step 10 to resume.

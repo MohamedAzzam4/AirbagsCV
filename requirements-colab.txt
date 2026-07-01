@@ -12,6 +12,17 @@
 anomalib[full]==2.0.0
 openvino==2024.4.0
 
+# Hugging Face stack — PIN THESE. Anomalib 2.0.0's open_clip dependency pulls
+# in huggingface-hub / transformers / tokenizers, and newer versions of these
+# packages break gradio imports and open_clip weight loading. If you see
+# `ImportError: cannot import name 'xxx' from 'gradio'` or
+# `OSError: Could not find file ...` from open_clip, it is almost certainly a
+# HuggingFace stack version mismatch. The versions below are verified
+# compatible with anomalib==2.0.0 + gradio==4.44.1 on Colab.
+huggingface-hub==0.25.2
+transformers==4.44.2
+tokenizers==0.19.1
+
 gradio==4.44.1
 matplotlib==3.9.2
 seaborn==0.13.2

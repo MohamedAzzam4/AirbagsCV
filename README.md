@@ -64,7 +64,7 @@ The correct first direction is unsupervised anomaly detection / anomaly segmenta
 | Google Colab training | Implemented | `notebooks/COLAB_GUIDE.md` | Calls repo scripts; does NOT reimplement training. |
 | Latency benchmark | Implemented | `scripts/benchmark_inference.py` | Patch/image-level only. **Not** line-scan production throughput. |
 | Reproducibility (pinned deps, seed, smoke test) | Implemented | `requirements*.txt`, `pyproject.toml`, `--seed` arg, `scripts/smoke_test.py` | Python 3.10–3.12 supported. Python 3.13+ may work but is not tested. |
-| Frequent checkpointing + resume | Implemented | `train_models.py` `build_checkpoint_callback()`: `save_last=True`, `every_n_epochs=1`, `save_top_k=3` monitored on `image_AUROC` | `last.ckpt` is the recommended resume target. Best ckpt is `model.ckpt`. |
+| Frequent checkpointing + resume | Implemented (weights-only) | `train_models.py` `build_checkpoint_callback()`: `save_last=True`, `every_n_epochs=1`, `save_top_k=3` monitored on `image_AUROC`, `save_weights_only=True` | `last.ckpt` is the recommended resume target. Best ckpt is `model.ckpt`. **EfficientAD resume is a warm restart** (weights only; optimizer/LR state not saved due to Anomalib 2.0.0 Evaluator pickle bug). PatchCore resume is conceptually meaningless (no optimizer state). Both checkpoints are fully loadable for inference/evaluation. |
 | Google Colab Mode A (Drive-persistent) | Implemented | `notebooks/COLAB_GUIDE.md` §"Mode A" | Trains directly from prepared data on Drive; safer after disconnect; slower. |
 | Google Colab Mode B (local-cache) | Implemented | `notebooks/COLAB_GUIDE.md` §"Mode B" | Copies prepared data from Drive to `/content` at runtime; faster; checkpoints still go to Drive. |
 
@@ -171,8 +171,8 @@ METRICS_CSV_PATH=results/benchmark_results.csv
 ======================================================================
 ```
 
-Checkpoints saved per epoch (every_n_epochs=1, save_top_k=3 by val image_AUROC):
-- `last.ckpt` — always overwritten each epoch; the recommended resume target.
+Checkpoints saved per epoch (every_n_epochs=1, save_top_k=3 by val image_AUROC, save_weights_only=True):
+- `last.ckpt` — always overwritten each epoch; the recommended resume target (warm restart — weights only, no optimizer state).
 - `model.ckpt` — best by validation `image_AUROC`.
 - `epoch=N-step=M.ckpt` — top-k best epoch checkpoints.
 
@@ -198,7 +198,7 @@ python scripts/train_models.py \
   --resume-from-checkpoint ./results/efficientad_aitex/weights/lightning/last.ckpt
 ```
 
-The recommended resume target is `last.ckpt` (it carries full optimizer + scheduler state).
+The recommended resume target is `last.ckpt`. **Note:** checkpoints are saved with `save_weights_only=True` (Anomalib 2.0.0's Evaluator callback is not picklable, which crashes full-state checkpointing). This means `--resume-from-checkpoint` loads the model weights but restarts the optimizer and epoch counter from scratch — it is a **warm restart**, not a true continuation. The checkpoint is fully loadable for inference and evaluation via `benchmark_inference.py` or `demo/inference.py`. See the `build_checkpoint_callback` docstring in `train_models.py` for the full explanation.
 
 ### 3b. Train PatchCore (alternative model)
 

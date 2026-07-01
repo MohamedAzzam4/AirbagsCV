@@ -19,6 +19,14 @@ anomalib[full]==2.0.0
 # (newer 2025.x renamed the package layout and breaks Anomalib 2.0.0 imports).
 openvino==2024.4.0
 
+# Hugging Face stack — PIN THESE. Anomalib 2.0.0's open_clip dependency pulls
+# in huggingface-hub / transformers / tokenizers, and newer versions break
+# gradio imports and open_clip weight loading. See COLAB_GUIDE.md §4 for
+# the full troubleshooting note.
+huggingface-hub==0.25.2
+transformers==4.44.2
+tokenizers==0.19.1
+
 gradio==4.44.1
 matplotlib==3.9.2
 seaborn==0.13.2
